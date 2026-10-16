@@ -1,0 +1,11 @@
+# Anticipated project dependencies. Pin versions when working code is added.
+torch
+torchvision
+datasets
+numpy
+Pillow
+matplotlib
+scikit-learn
+PyYAML
+mlflow
+pytest

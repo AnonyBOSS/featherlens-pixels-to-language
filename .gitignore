@@ -1,0 +1,40 @@
+# Python caches and environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Editor and system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Datasets, outputs, checkpoints and tracking
+data/
+# Track an empty outputs/ directory, not its generated files
+outputs/*
+!outputs/.gitkeep
+mlruns/
+wandb/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.h5
+*.hdf5
+
+# Notebook caches
+.ipynb_checkpoints/
+
+# Packaging/build
+build/
+dist/
+*.egg-info/
