@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** Initial repository scaffold. The architecture and experiments described below are planned; model training, inference, and evaluation are not implemented yet.
+> **Development status:** Revision-pinned CUB source loading, schema validation, and caption parsing are implemented. The model architecture and experiments described below remain planned; model training, inference, and evaluation are not implemented yet.
 
 ## Overview
 
@@ -45,11 +45,25 @@ The project uses **Caltech–UCSD Birds-200-2011 (CUB-200-2011)** with associate
 | Total images | 11,788 |
 | Training images | 5,994 |
 | Test images | 5,794 |
-| Captions per image | 10 |
+| Captions per image (documented expectation) | 10 |
 
-Each record includes an image, its species label, and a `description` field containing ten newline-separated captions. Preprocessing will separate these captions, create a validation partition from the training split, and generate grayscale/RGB pairs for colorization. The official test split will be reserved for final evaluation.
+The source schema includes an image, its species label, and a `description` string. Sampled records contain ten newline-separated captions; a full caption-count audit is pending. Later preprocessing will create a validation partition from the official training split and grayscale/RGB pairs for colorization. The official test split will be reserved for final evaluation.
 
 **Dataset files are not included in this repository.**
+
+### Available data foundation
+
+The Stage 1 source loader pins both Hugging Face repositories to verified commits, checks their schemas and ordered class mappings, and exposes stable image IDs with linked caption records. A one-row streamed smoke test passed for each official split. Full-dataset integrity and cleaning checks remain pending.
+
+```python
+from src.data.source import load_cub_sources
+
+sources = load_cub_sources(streaming=True)
+image, captions = next(sources["train"].iter_records())
+print(image.image_id, image.class_name, len(captions))
+```
+
+Use `streaming=True` for sequential inspection. The default downloads and caches the source data for later random access. Images remain undecoded source references in this interface; classification transforms and PyTorch datasets are not implemented yet. See [the data contract](docs/data_contract.md) for exact fields, revision pins, and verification limits.
 
 ## Project structure
 
@@ -71,7 +85,7 @@ pixels-to-language/
 └── README.md
 ```
 
-Directories are created as placeholders for future development. The repository intentionally contains no model implementations or runnable training commands at this stage.
+Model, training, evaluation, and visualization directories remain placeholders for future development. The repository intentionally contains no model implementations or runnable training commands at this stage.
 
 ## Getting started
 

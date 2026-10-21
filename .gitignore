@@ -17,7 +17,7 @@ venv/
 Thumbs.db
 
 # Datasets, outputs, checkpoints and tracking
-data/
+/data/
 # Track an empty outputs/ directory, not its generated files
 outputs/*
 !outputs/.gitkeep
