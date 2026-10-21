@@ -37,9 +37,9 @@ Each returned `CubSource` exposes `spec`, `class_names`, `dataset`, and `iter_re
 hf:<repository-id>@<full-commit-sha>:<official-source-split>:<zero-based-source-row>
 ```
 
-For example, the first train row is `hf:Multimodal-Fatima/CUB_train@bd3988995e6db193427255abdebd522afe24ce76:train:0`. The Hugging Face `id` and `file_name` are retained for traceability, but neither is used as the primary key. The source `id` begins at zero in each repository, and whole-dataset filename uniqueness has not been verified.
+For example, the first train row is `hf:Multimodal-Fatima/CUB_train@bd3988995e6db193427255abdebd522afe24ce76:train:0`. The Hugging Face `id` and `file_name` are retained for traceability, but neither is used as the primary key. The source `id` begins at zero in each repository. The [Stage 2 audit](integrity_audit.md) records filename validity and duplicate observations separately from source identity.
 
-`ImageRecord` fields are `image_id`, `source_repo`, `source_revision`, `source_split`, `source_row`, `source_id`, `file_name`, `class_id`, and `class_name`. Records are immutable Python dataclasses. The loader checks that each read label is an integer within the ordered class mapping; other per-row validity checks belong to the later audit stage.
+`ImageRecord` fields are `image_id`, `source_repo`, `source_revision`, `source_split`, `source_row`, `source_id`, `file_name`, `class_id`, and `class_name`. Records are immutable Python dataclasses. The loader checks that each read label is an integer within the ordered class mapping; other per-row validity checks belong to the [Stage 2 audit](integrity_audit.md).
 
 The row number is stable for the pinned repository commit and split. A new commit means a new identity namespace even if a filename happens to be unchanged. This avoids accidental joins across different source versions.
 
@@ -51,8 +51,10 @@ The original `description` remains in the Hugging Face source view. Classificati
 
 ## Verification boundary
 
-Live Hugging Face metadata reports 5,994 train and 5,794 test rows and matching five-field schemas. A small streamed sample from each pinned commit loaded with `datasets.load_dataset` and showed 200 classes and ten caption lines. These observations do not establish whole-dataset ID or filename uniqueness, ten valid captions for every image, image decodability, class balance after exclusions, or absence of duplicates and leakage. Those require a full audit in a later stage.
+Stage 1 verified live Hugging Face metadata reporting 5,994 train and 5,794 test rows and matching five-field schemas. A small streamed sample from each pinned commit loaded with `datasets.load_dataset` and showed 200 classes and ten caption lines. Those sample observations alone did not establish full-dataset integrity.
 
 The Stage 1 synthetic tests cover identity, caption parsing, schema checks, ordered class-map agreement, pinned loader arguments, undecoded image references, and invalid labels. No full dataset scan is part of Stage 1.
 
 On October 21, 2026, a live `load_cub_sources(streaming=True)` smoke test read the first row from each pinned revision. Both exposed the same ordered 200-class mapping, produced ten linked caption records, and kept `image.decode` false. This is a two-row check, not a full dataset audit.
+
+The essential Stage 2 audit on October 21, 2026 subsequently accounted for all 11,788 pinned source rows and decoded every image. It found 117,880 structurally usable caption lines, no metadata or image error flags, one exact duplicate pair within training, and no exact group spanning the official train/test boundary. See [the audit output contract and findings](integrity_audit.md) for the measured coverage, hashes, machine-readable flags, and remaining limits. Source records and this Stage 1 interface remain unchanged.

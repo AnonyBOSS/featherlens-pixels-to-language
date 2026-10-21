@@ -2,6 +2,7 @@
 torch
 torchvision
 datasets
+fsspec
 numpy
 Pillow
 matplotlib

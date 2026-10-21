@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** Revision-pinned CUB source loading, schema validation, and caption parsing are implemented. The model architecture and experiments described below remain planned; model training, inference, and evaluation are not implemented yet.
+> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, and a complete read-only integrity audit are implemented. The model architecture and experiments described below remain planned; model training, inference, and evaluation are not implemented yet.
 
 ## Overview
 
@@ -47,13 +47,13 @@ The project uses **Caltech–UCSD Birds-200-2011 (CUB-200-2011)** with associate
 | Test images | 5,794 |
 | Captions per image (documented expectation) | 10 |
 
-The source schema includes an image, its species label, and a `description` string. Sampled records contain ten newline-separated captions; a full caption-count audit is pending. Later preprocessing will create a validation partition from the official training split and grayscale/RGB pairs for colorization. The official test split will be reserved for final evaluation.
+The source schema includes an image, its species label, and a `description` string. The full integrity audit verified ten structurally valid caption lines for every image in the pinned sources. Later preprocessing will create a validation partition from the official training split and grayscale/RGB pairs for colorization. The official test split will be reserved for final evaluation.
 
 **Dataset files are not included in this repository.**
 
 ### Available data foundation
 
-The Stage 1 source loader pins both Hugging Face repositories to verified commits, checks their schemas and ordered class mappings, and exposes stable image IDs with linked caption records. A one-row streamed smoke test passed for each official split. Full-dataset integrity and cleaning checks remain pending.
+The Stage 1 source loader pins both Hugging Face repositories to verified commits, checks their schemas and ordered class mappings, and exposes stable image IDs with linked caption records. A one-row streamed smoke test passed for each official split. The Stage 2 audit subsequently accounted for all 11,788 source rows, validated metadata and caption structure, fully decoded every image, and computed encoded-byte and normalized-pixel SHA-256 hashes. It found one exact duplicate pair within training and no exact duplicate group spanning the official train/test boundary. Cleaning and splitting remain planned.
 
 ```python
 from src.data.source import load_cub_sources
@@ -64,6 +64,17 @@ print(image.image_id, image.class_name, len(captions))
 ```
 
 Use `streaming=True` for sequential inspection. The default downloads and caches the source data for later random access. Images remain undecoded source references in this interface; classification transforms and PyTorch datasets are not implemented yet. See [the data contract](docs/data_contract.md) for exact fields, revision pins, and verification limits.
+
+### Available integrity audit
+
+```python
+from src.data.integrity_audit import audit_pinned_sources
+
+summary = audit_pinned_sources("outputs/integrity-audit")
+assert summary["coverage_complete"]
+```
+
+The audit writes image and caption manifests, exact duplicate groups, and an explicit coverage summary under the ignored `outputs/` directory. It preserves source data and original caption-line positions. See [the audit contract and verified findings](docs/integrity_audit.md) for quality flags, normalization rules, failure recovery, and Stage 3 consumption. Near-duplicate screening and cleaning decisions are not implemented.
 
 ## Project structure
 
