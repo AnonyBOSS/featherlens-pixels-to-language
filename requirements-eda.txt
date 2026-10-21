@@ -1,0 +1,9 @@
+# Tested CPU-only EDA environment; Python 3.12.
+# Full model-training dependencies remain in requirements.txt.
+datasets==5.1.0
+numpy==2.5.4
+Pillow==13.0.0
+matplotlib==3.11.2
+pytest==9.1.1
+# Avoid the ResourceTracker shutdown bug on early Python 3.12 Windows builds.
+multiprocess==0.70.17
