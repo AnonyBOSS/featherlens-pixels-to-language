@@ -58,3 +58,7 @@ The Stage 1 synthetic tests cover identity, caption parsing, schema checks, orde
 On October 21, 2026, a live `load_cub_sources(streaming=True)` smoke test read the first row from each pinned revision. Both exposed the same ordered 200-class mapping, produced ten linked caption records, and kept `image.decode` false. This is a two-row check, not a full dataset audit.
 
 The essential Stage 2 audit on October 21, 2026 subsequently accounted for all 11,788 pinned source rows and decoded every image. It found 117,880 structurally usable caption lines, no metadata or image error flags, one exact duplicate pair within training, and no exact group spanning the official train/test boundary. See [the audit output contract and findings](integrity_audit.md) for the measured coverage, hashes, machine-readable flags, and remaining limits. Source records and this Stage 1 interface remain unchanged.
+
+## Native image access extension
+
+`src.data.image_io.read_source_image(source, source_row)` exposes native EXIF-corrected RGB pixels linked to the unchanged source identity and class mapping. The [image-access contract](image_access.md) documents dimensions, color/alpha/ICC behavior, raw-row scope, failure statuses, and optional audit joins. This extension does not change the Stage 1 record or caption fields.
