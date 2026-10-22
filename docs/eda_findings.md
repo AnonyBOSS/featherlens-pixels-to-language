@@ -1,5 +1,175 @@
 # EDA findings
 
+## Stage 3: caption language and prepared-training integration
+
+Analysis date: October 22, 2026. The caption population is the complete official
+training source at revision `bd3988995e6db193427255abdebd522afe24ce76`: 5,994 images
+and 59,940 nonempty, token-bearing captions. Methods and commands are in
+[Stage 3 instructions](eda_stage3.md). Earlier Stage 1/2 measurements below remain
+preserved; derived partitions are new views of the same raw training rows.
+
+### Color, anatomy, and directional language
+
+**Question:** What vocabulary categories do training captions actually mention?
+
+**Method:** Use the declared `caption-terms-v1` lexicon on the existing analysis
+tokens plus explicit hyphen components. Count each term/category once per caption
+and once per image. Category totals use unions. Source descriptions stay unchanged.
+
+**Measured finding:**
+
+| Category | Captions with a mention | Share of 59,940 captions | Images with a mention |
+| --- | ---: | ---: | ---: |
+| Color | 58,438 | 97.494% | 5,994 |
+| Anatomy | 58,278 | 97.227% | 5,994 |
+| Direction/position | 520 | 0.868% | 482 |
+
+The declared directional category appears for 8.041% of images. It includes terms
+such as `above`, `upper`, and `lower`; it is not a count of horizontal orientation.
+Separately, `left` occurs in three captions across three images, and `right` in
+20 captions across 19 images. These term counts are not added into a claimed
+count of distinct left/right captions. The saved lexicon groups gray/grey,
+beak/bill, breast/chest, and other explicitly listed variants.
+
+**Interpretation:** Color and anatomy descriptions are common under this matching
+rule, with at least one of each in every image's caption set. This establishes
+lexical coverage, not discriminative color information or visual correctness.
+Directional mentions are less frequent and mix body-part position with orientation.
+
+**Recommendation:** Preserve these source-linked examples for later captioning
+review. Inspect left/right context before choosing future text-aware geometric
+augmentation. This analysis does not change the classification flip policy.
+Discuss strong color transformations before captioning experiments, without
+assuming that a whole-image RGB mean verifies a mentioned bird color.
+
+**Limitations:** The hand-declared lexicon is incomplete. Negation, context,
+polysemy, species names, and unlisted compounds can affect matches. No semantic
+image-caption validation, automatic caption correction, or augmentation decision
+was performed.
+
+### Within-image diversity, overlap, and class variation
+
+**Question:** How much lexical variety do an image's captions provide, and does
+caption length vary across species?
+
+**Method:** Pool analysis tokens within each image for type/token ratio. Average
+unordered token-set Jaccard over its token-bearing caption pairs, retaining
+stopwords and repeated captions. Summarize per-image means by class with equal
+image weighting; no independence assumption is made for an image's ten captions.
+
+**Measured finding:** All 5,994 images provide 45 caption pairs each, for
+269,730 pairs. Median per-image TTR is 0.3351 (p05 0.2739, p95 0.4000). Median
+per-image mean Jaccard is 0.3047 (p05 0.2383, p95 0.3850). The medians are
+151 analysis tokens and 51 distinct token types per image; these are separate
+marginal summaries.
+Per-image mean caption length averages 15.2504 words.
+
+Across the 200 class means, Fish Crow is lowest at 12.9133 words and European
+Goldfinch highest at 17.3433 words; both have 30 source images. Selected examples
+include exact repeated captions with Jaccard 1 and differently worded captions
+of the same image with Jaccard 0. The report retains bounded examples with original
+caption indices, including repeated descriptions at source row 20.
+
+**Interpretation:** Captions contain both shared vocabulary and differing lexical
+details. Jaccard 1 does not prove identical meaning, and Jaccard 0 does not prove
+contradictory descriptions. Class-length differences may reflect descriptions,
+annotator style, or visual content; this study does not identify their cause.
+
+**Recommendation:** Use the distributions and examples for reporting and review.
+Keep TTR alongside token counts, and keep repeated captions visible. Do not use
+these summaries to automatically remove captions or rank species by difficulty.
+
+**Limitations:** TTR depends on text length. Jaccard ignores word order and meaning,
+and common words inflate overlap. Class comparisons are descriptive; no hypothesis
+tests, semantic model, annotation-quality labels, or fitted thresholds are included.
+
+### Prepared split coverage and quality-flag integration
+
+**Question:** Do the verified classification partitions preserve source coverage,
+class representation, and exact-group isolation, and how do saved training
+measurements distribute across them?
+
+**Method:** Regenerate the shared audit and preparation with pinned source
+revisions, seed 42, validation fraction 0.20, policy `classification-v1`, and
+split version `stratified-exact-group-v1`. Validate completeness and fingerprints
+through the existing shared APIs. Join canonical training IDs to saved image and
+caption measurements; do not implement another cleaner or split algorithm.
+
+**Measured finding:** The audit accounts for all 11,788 official source rows.
+Preparation yields 4,794 training, 1,200 validation, 5,794 official test, and zero
+excluded rows. All 200 classes remain in training and validation. There are 194
+training classes with 24 images and six with 23; every validation class has six.
+All 5,994 training-source rows join to both EDA reports, without unknown classes
+or missing numeric observations in this run.
+
+No training-source error flags are present. The two `duplicate.exact` warning
+images are Pigeon Guillemot source rows 1712 and 1731, both in validation and in
+one recorded exact group. There is no shared canonical ID, encoded-byte hash,
+normalized-pixel hash, or exact group between derived training and validation.
+These are checks of supplied manifest evidence, not new duplicate algorithms.
+
+| Equal-image mean | Derived training, n=4,794 | Validation, n=1,200 |
+| --- | ---: | ---: |
+| Native brightness | 0.4868 | 0.4910 |
+| Native contrast | 0.1774 | 0.1800 |
+| Native saturation | 0.3137 | 0.3154 |
+| Mean caption words per image | 15.2484 | 15.2582 |
+| Per-image TTR | 0.3350 | 0.3360 |
+| Per-image mean Jaccard | 0.3079 | 0.3064 |
+
+**Interpretation:** The supplied split preserves the measured class coverage and
+recorded exact-group constraint. These selected means are numerically close, but
+that does not establish equality of all distributions or model suitability. The
+duplicate pair contributes two validation rows despite matching image content;
+retaining it follows the approved shared policy and does not make it independent.
+
+**Recommendation:** Keep the fixed memberships and document the validation pair
+when interpreting later metrics. Any future fitted normalization or vocabulary
+policy must use derived training membership, with the intended image pipeline and
+weighting. No splitting, exclusions, preprocessing constants, or augmentation
+settings are changed by this EDA.
+
+**Limitations:** Essential audit flags do not verify label/caption semantics or
+perceptual near-duplicates. Native-pixel summaries are not transformed/padded
+tensor statistics. Official test rows were used only by the authorized integrity
+audit and for identity/assignment counts here; test appearance and captions were
+not used for statistical EDA or preprocessing recommendations.
+
+### Stage 3 validation and artifacts
+
+After integration with main `69cc366`, the complete repository suite passed
+**533 tests**, with no failures or skips, including the shared pipeline and cached
+train/validation integration checks. The earlier EDA-only checkpoint passed 435.
+Actual caption results reconcile to the earlier 5,994-image/59,940-caption report, including total
+token counts and every class count. Twelve selected actual caption records were
+reduced independently. Fourteen train/validation metric summaries, including all
+saved percentiles, agree with independent NumPy reductions within `1e-12`.
+
+The shared manifest loader independently validates the real preparation before
+analysis. Source revisions, audit completeness, preparation metadata, expected
+counts, class coverage, and exact-group isolation were checked. All four new
+figure groups were visually inspected. Same-checkout regeneration reproduced
+all measured results and all 13 figure groups: PNGs are byte-identical and PDFs
+differ only in export timestamps. Sixteen actual image records independently
+confirm the native RGB, brightness, contrast, saturation and resolution formulas
+within `1e-10`. Actual pixel measurements are complete for all 5,994 raw training
+images; they are not fitted or post-transform normalization statistics.
+
+All 37 earlier EDA/audit/preparation artifacts remain byte-identical. Fresh,
+consistent reports and figures are under `outputs/eda-stage3/integrated-69cc366/`;
+their image-report scope wording includes the 1,200 derived-validation members
+of raw training. The earlier isolated prepared integration preserved its 28
+preexisting EDA outputs. Stage 3-owned changes leave the shared pipeline and
+README untouched; merged upstream changes arrived through the branch update.
+
+New generated reports are `outputs/eda/reports/train-caption-details-full.json`
+and `outputs/eda/reports/prepared-training-eda.json`. New PNG/PDF stems are
+`training_caption_language`, `training_caption_diversity`,
+`training_class_caption_variation`, and `training_prepared_class_coverage`.
+All generated reports, figures, audit/preparation manifests, and caches remain
+Git-ignored. The full findings do not certify semantic annotation quality or fit
+any model/preprocessing policy.
+
 ## Stage 2: complete official training analysis
 
 Analysis date: October 21, 2026. This section supersedes the preliminary prefix
