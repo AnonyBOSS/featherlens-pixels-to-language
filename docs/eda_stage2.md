@@ -204,8 +204,10 @@ generate_image_figures(report, "outputs/eda/figures", image_getter=pixels)
 Only the selected gallery images are decoded and checked again. Plotting functions
 consume the saved measurements, and do not fit thresholds or preprocessing.
 
-Audit quality flags and future derived train/validation manifests remain later
-integration inputs. The official test split remains reserved for final evaluation.
+Classification manifest generation is already available on `main` through the
+[classification pipeline](classification_data.md). Integration of audit quality
+flags and derived train/validation manifests into this statistical EDA remains
+deferred. The official test split remains reserved for final evaluation.
 
 ## Tests
 
