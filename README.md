@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, and a complete read-only integrity audit are implemented. The model architecture and experiments described below remain planned; model training, inference, and evaluation are not implemented yet.
+> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, a complete read-only integrity audit, and the classification data pipeline are implemented. The model architecture and experiments described below remain planned; model training, inference, and evaluation are not implemented yet.
 
 ## Overview
 
@@ -47,13 +47,13 @@ The project uses **Caltech–UCSD Birds-200-2011 (CUB-200-2011)** with associate
 | Test images | 5,794 |
 | Captions per image (documented expectation) | 10 |
 
-The source schema includes an image, its species label, and a `description` string. The full integrity audit verified ten structurally valid caption lines for every image in the pinned sources. Later preprocessing will create a validation partition from the official training split and grayscale/RGB pairs for colorization. The official test split will be reserved for final evaluation.
+The source schema includes an image, its species label, and a `description` string. The full integrity audit verified ten structurally valid caption lines for every image in the pinned sources. The classification pipeline derives a reproducible validation partition from the official training split. Grayscale/RGB pairs for colorization remain planned. The official test split will be reserved for final evaluation.
 
 **Dataset files are not included in this repository.**
 
 ### Available data foundation
 
-The Stage 1 source loader pins both Hugging Face repositories to verified commits, checks their schemas and ordered class mappings, and exposes stable image IDs with linked caption records. A one-row streamed smoke test passed for each official split. The Stage 2 audit subsequently accounted for all 11,788 source rows, validated metadata and caption structure, fully decoded every image, and computed encoded-byte and normalized-pixel SHA-256 hashes. It found one exact duplicate pair within training and no exact duplicate group spanning the official train/test boundary. Cleaning and splitting remain planned.
+The Stage 1 source loader pins both Hugging Face repositories to verified commits, checks their schemas and ordered class mappings, and exposes stable image IDs with linked caption records. A one-row streamed smoke test passed for each official split. The Stage 2 audit subsequently accounted for all 11,788 source rows, validated metadata and caption structure, fully decoded every image, and computed encoded-byte and normalized-pixel SHA-256 hashes. It found one exact duplicate pair within training and no exact duplicate group spanning the official train/test boundary. Audit-backed classification eligibility and reproducible training/validation manifests are now available.
 
 ```python
 from src.data.source import load_cub_sources
@@ -63,7 +63,7 @@ image, captions = next(sources["train"].iter_records())
 print(image.image_id, image.class_name, len(captions))
 ```
 
-Use `streaming=True` for sequential inspection. The default downloads and caches the source data for later random access. Images remain undecoded source references in this interface; classification transforms and PyTorch datasets are not implemented yet. See [the data contract](docs/data_contract.md) for exact fields, revision pins, and verification limits.
+Use `streaming=True` for sequential inspection. The default downloads and caches the source data for later random access. Images remain undecoded source references in this interface; classification consumers use the separate lazy PyTorch interface described below. See [the data contract](docs/data_contract.md) for exact fields, revision pins, and verification limits.
 
 ### Available integrity audit
 
@@ -74,11 +74,27 @@ summary = audit_pinned_sources("outputs/integrity-audit")
 assert summary["coverage_complete"]
 ```
 
-The audit writes image and caption manifests, exact duplicate groups, and an explicit coverage summary under the ignored `outputs/` directory. It preserves source data and original caption-line positions. See [the audit contract and verified findings](docs/integrity_audit.md) for quality flags, normalization rules, failure recovery, and Stage 3 consumption. Near-duplicate screening and cleaning decisions are not implemented.
+The audit writes image and caption manifests, exact duplicate groups, and an explicit coverage summary under the ignored `outputs/` directory. It preserves source data and original caption-line positions. See [the audit contract and verified findings](docs/integrity_audit.md) for quality flags, normalization rules, failure recovery, and Stage 3 consumption. Near-duplicate screening remains deferred; classification eligibility decisions are described below.
 
 ### Native image access for analysis
 
 `read_source_image(source, source_row)` returns a raw indexed source row with a canonical image ID, original class metadata, native EXIF-corrected PIL RGB pixels, original/oriented dimensions, mode/profile/transparency facts, and recoverable failure status. It performs no resizing, filtering, training transforms, or source modification and requires no PyTorch or classification preparation. See [the shared image-access contract and training example](docs/image_access.md).
+
+### Available classification data pipeline
+
+```python
+from src.data.preparation import prepare_classification, load_classification_manifest
+
+summary = prepare_classification("outputs/integrity-audit", "outputs/classification-v1")
+rows = load_classification_manifest("outputs/classification-v1")
+print(summary["partition_counts"])
+```
+
+Verified preparation produced **4,794 training, 1,200 validation, and 5,794 official test rows**, with no exclusions. Every class has six validation rows; training has 23–24 rows per class. Splitting is class-stratified with seed 42; both exact-duplicate Pigeon Guillemot rows remain together in validation. Original labels, captions, source assets, and test assignments are preserved.
+
+The lazy Dataset returns `{"image": tensor, "label": class_id, "image_id": stable_id}`. Default preprocessing fits the entire EXIF-corrected RGB image into a centered white 224×224 canvas, preserving aspect ratio within pixel rounding. Horizontal flipping applies only to training. Normalization is configurable; the earlier crop profile is an explicit alternative. Real CPU batches, loss/backpropagation, and Windows two-worker loading have been verified.
+
+Use Python 3.12 and [requirements-classification.txt](requirements-classification.txt) for the verified environment. See [the classification handoff](docs/classification_data.md) for installation, eligibility policy, split provenance, model-specific normalization, a Windows-safe batch example, and verification limits. Generated audits, preparation manifests, environments, and previews remain ignored by Git.
 
 ## Project structure
 
@@ -96,7 +112,8 @@ pixels-to-language/
 │   ├── visualization/    # Plots and model explainability
 │   └── utils/            # Shared utilities
 ├── tests/                # Automated tests
-├── requirements.txt      # Initial dependency list
+├── requirements-classification.txt  # Verified classification data dependencies
+├── requirements.txt      # Anticipated model-training dependencies
 └── README.md
 ```
 
@@ -131,7 +148,7 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> The dependency list is preliminary and will be version-pinned as development progresses. **Installation prepares the environment only**; training and prediction commands are not available in this scaffold.
+> For the verified classification data environment, follow [the pinned setup and batch example](docs/classification_data.md). The broader `requirements.txt` remains an anticipated model-training dependency list. Training and prediction commands are not implemented.
 
 ### Planned CLI
 
