@@ -12,7 +12,7 @@ From the repository root, using Python 3.12 on Windows:
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-eda.txt
-.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q tests/analysis
 ```
 
 On another platform, use the corresponding virtual-environment Python path
@@ -22,8 +22,9 @@ pins do not lock every transitive dependency or replace the full project list.
 `multiprocess` is pinned to 0.70.17 because 0.70.19 produced a ResourceTracker
 shutdown traceback on the installed Windows Python 3.12.0 interpreter. Its
 dependency constraints remain compatible with the pinned `datasets` version.
-Tests use synthetic records and do not download CUB. Existing data-layer tests
-remain part of the same test run.
+These EDA tests use synthetic records and do not download CUB. For the complete
+repository suite, install the classification dependencies and follow the
+[handoff instructions](eda_handoff.md#environment-and-checks).
 
 ## Bounded source exploration
 
@@ -101,7 +102,8 @@ equal coverage. No training vocabulary or preprocessing threshold is fitted.
 ## Integration boundaries
 
 Use `image_id` for joins and retain `source_split` as official train/test identity.
-A future validation manifest must add derived split identity separately. Image
+The shared classification manifest retains derived partition identity separately;
+[Stage 3](eda_stage3.md) consumes it without changing official split identity. Image
 access, decoding failures, quality flags, cleaning, duplicate algorithms,
 augmentation, and the shared CLI remain with the data pipeline. Extend the
 approved contract before adding dependent image measurements. Shared README

@@ -1,5 +1,8 @@
 # Caption language and prepared-training EDA
 
+For final reproduction, delivery files and deferred work, see the
+[EDA handoff](eda_handoff.md).
+
 This stage adds training-caption term mentions, within-image lexical diversity,
 and class-level caption-length comparisons. It also joins saved image/caption
 measurements to the existing classification manifest. Statistical functions,

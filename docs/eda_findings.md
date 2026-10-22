@@ -1,5 +1,18 @@
 # EDA findings
 
+## Delivery scope
+
+The [EDA handoff](eda_handoff.md) identifies the final report set, reproduction
+commands, figures and validation evidence. Native image measurements are complete
+for all 5,994 raw training images. Raw training includes the 1,200 derived
+validation members; future fitted preprocessing uses the 4,794 derived training
+images only.
+
+Deferred by agreement: blur/sharpness scoring, formal between-species image
+comparisons, new image-caption association studies, and exhaustive spelling or
+semantic-quality audits. Existing contrast measurements do not measure blur.
+Per-class descriptive image summaries remain available.
+
 ## Stage 3: caption language and prepared-training integration
 
 Analysis date: October 22, 2026. The caption population is the complete official

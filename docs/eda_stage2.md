@@ -214,8 +214,11 @@ The official test split remains reserved for final evaluation.
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q tests/analysis
 ```
+
+For the complete repository suite, use the classification dependencies and
+[handoff instructions](eda_handoff.md#environment-and-checks).
 
 Synthetic tests check full iterator exhaustion, reference-count mismatches,
 interrupted scans, training-only command and builder guards, saved-frequency
