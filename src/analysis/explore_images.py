@@ -135,7 +135,11 @@ def build_image_report(source, *, limit: int | None = None, expected_records: in
             "RGB conversion is not ICC color management; color statistics include backgrounds.",
             "Transparency metadata excludes color measurement even if an alpha image might be fully opaque.",
             "Extremes are examples, not automatic quality failures or preprocessing thresholds.",
-            "No official test data or derived validation partition was analyzed.",
+            "No derived-partition filtering is applied. A complete scan of the pinned CUB "
+            "official training set covers all 5,994 raw images, including the 1,200 "
+            "derived-validation members of classification-v1 (seed 42, fraction 0.20); "
+            "limited scans cover only their requested raw-source prefix. "
+            "No official test data was analyzed and no preprocessing parameters were fitted.",
             "Future fitted preprocessing must use the eventual derived training partition.",
         ],
     }
