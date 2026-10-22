@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, a complete read-only integrity audit, and the classification data pipeline are implemented. The model architecture and experiments described below remain planned; model training, inference, and evaluation are not implemented yet.
+> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, a complete read-only integrity audit, the classification data pipeline, and full statistical EDA are implemented. The model architecture and experiments described below remain planned; model training, inference, and evaluation are not implemented yet.
 
 ## Overview
 
@@ -43,8 +43,10 @@ The project uses **Caltech–UCSD Birds-200-2011 (CUB-200-2011)** with associate
 | --- | --- |
 | Bird categories | 200 |
 | Total images | 11,788 |
-| Training images | 5,994 |
-| Test images | 5,794 |
+| Raw official training images | 5,994 |
+| Derived classification training images | 4,794 |
+| Derived validation images | 1,200 |
+| Official test images | 5,794 |
 | Captions per image (documented expectation) | 10 |
 
 The source schema includes an image, its species label, and a `description` string. The full integrity audit verified ten structurally valid caption lines for every image in the pinned sources. The classification pipeline derives a reproducible validation partition from the official training split. Grayscale/RGB pairs for colorization remain planned. The official test split will be reserved for final evaluation.
@@ -80,6 +82,28 @@ The audit writes image and caption manifests, exact duplicate groups, and an exp
 
 `read_source_image(source, source_row)` returns a raw indexed source row with a canonical image ID, original class metadata, native EXIF-corrected PIL RGB pixels, original/oriented dimensions, mode/profile/transparency facts, and recoverable failure status. It performs no resizing, filtering, training transforms, or source modification and requires no PyTorch or classification preparation. See [the shared image-access contract and training example](docs/image_access.md).
 
+### Available statistical EDA
+
+Statistical EDA covers all **5,994 raw official-training images and 59,940 captions**,
+including the 1,200 derived-validation members. It includes class/caption
+statistics, native-image measurements, lexical diversity and overlap, 13 PNG/PDF
+figure groups, captioned galleries, and manifest-aware train/validation summaries.
+Official test images and captions are excluded from statistical summaries.
+
+Start metadata exploration from the repository root after installing the pinned
+EDA dependencies:
+
+```bash
+python -m src.analysis.explore --full-training --split train
+python -m src.visualization.eda_plots --report outputs/eda/reports/train-full.json --output-dir outputs/eda/figures
+```
+
+See [the EDA handoff](docs/eda_handoff.md) for the complete image/caption workflow,
+verified preparation paths, report schemas, delivery inventory and limitations.
+Reports and figures are generated under ignored `outputs/` directories and
+distributed separately. **Fit any new data-derived preprocessing or vocabulary
+parameters using only the 4,794 derived training records.**
+
 ### Available classification data pipeline
 
 ```python
@@ -106,24 +130,26 @@ pixels-to-language/
 ├── outputs/              # Generated figures, logs, and checkpoints (gitignored)
 ├── src/
 │   ├── data/             # Dataset loading and preprocessing
+│   ├── analysis/         # Statistical EDA and report generation
 │   ├── models/           # Shared encoder and task-specific heads
 │   ├── training/         # Training workflows
 │   ├── evaluation/       # Metrics and benchmarking
-│   ├── visualization/    # Plots and model explainability
+│   ├── visualization/    # EDA plots; model explainability planned
 │   └── utils/            # Shared utilities
 ├── tests/                # Automated tests
+├── requirements-eda.txt  # Pinned statistical EDA dependencies
 ├── requirements-classification.txt  # Verified classification data dependencies
 ├── requirements.txt      # Anticipated model-training dependencies
 └── README.md
 ```
 
-Model, training, evaluation, and visualization directories remain placeholders for future development. The repository intentionally contains no model implementations or runnable training commands at this stage.
+Model, training and evaluation implementations remain planned. Statistical analysis and EDA visualization modules are available. The repository intentionally contains no model implementations or runnable training commands at this stage.
 
 ## Getting started
 
-**Prerequisites:** Python 3.11+ and Git. A GPU is recommended for training once the pipeline is implemented.
+**Prerequisites:** Python 3.12 and Git for the verified data/EDA environment. A GPU is recommended for training once the pipeline is implemented.
 
-From the repository root, create a virtual environment and install the preliminary dependencies:
+From the repository root, create a virtual environment:
 
 ```bash
 python -m venv .venv
@@ -141,14 +167,14 @@ Or on **macOS / Linux**:
 source .venv/bin/activate
 ```
 
-Then install the dependencies:
+For statistical EDA, install the pinned dependencies:
 
 ```bash
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install -r requirements-eda.txt
 ```
 
-> For the verified classification data environment, follow [the pinned setup and batch example](docs/classification_data.md). The broader `requirements.txt` remains an anticipated model-training dependency list. Training and prediction commands are not implemented.
+> For classification data and the complete repository test suite, follow [the pinned CPU setup and batch example](docs/classification_data.md). EDA-only tests run with `python -m pytest -q tests/analysis`; complete tests also require the classification dependencies. The broader `requirements.txt` remains an anticipated model-training dependency list. Training and prediction commands are not implemented.
 
 ### Planned CLI
 
@@ -167,7 +193,7 @@ The actual commands and configuration files will be documented once the correspo
 
 ## Development roadmap
 
-- [ ] **Data foundation:** Exploratory data analysis, caption cleaning, data splits, transforms, and augmentation
+- [x] **Data foundation:** Statistical EDA, source-preserving caption preparation, integrity audit, reproducible splits, transforms, and classification augmentation
 - [ ] **Classification:** CNN baseline trained from scratch, transfer learning, and model comparison
 - [ ] **Optimization and explainability:** Grid search, random search, experiment tracking, and Grad-CAM
 - [ ] **Colorization:** Grayscale-to-color encoder–decoder model

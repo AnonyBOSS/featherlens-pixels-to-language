@@ -1,7 +1,8 @@
 # Proposed README contribution
 
-The README remains unchanged. Apply these small additions during coordinated
-integration; keep the existing project overview and model roadmap.
+These additions are incorporated in the coordinator documentation follow-up;
+see the [updated README](../README.md). This retained proposal records the
+contribution while preserving the original project overview and model roadmap.
 
 Add statistical EDA to the development-status sentence. After the native-image
 access section, add:

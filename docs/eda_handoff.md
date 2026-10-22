@@ -20,39 +20,60 @@ py -3.12 -m venv .venv
 
 For the complete repository suite, install the CPU classification dependencies
 using [the shared setup](classification_data.md#reproduce-the-preparation).
-Then set the cache and preparation paths:
+Generate `outputs/integrity-audit` and `outputs/classification-v1` through that
+guide, or use the verified packaged preparation described below. Keep the same
+Hugging Face cache configuration used to populate the sources; the shared
+quickstart uses the default cache. Changing `HF_HOME` or related cache variables
+after downloading would select a different cache.
+
+Set the preparation path and plotting options:
 
 ```powershell
-$env:HF_HOME=Join-Path (Get-Location).Path '.venv\hf-cache'
-$env:HF_DATASETS_CACHE=Join-Path $env:HF_HOME 'datasets'
-$env:HF_HUB_CACHE=Join-Path $env:HF_HOME 'hub'
 $env:MPLBACKEND='Agg'
 $env:MPLCONFIGDIR=Join-Path (Get-Location).Path '.venv\mpl-cache'
 $env:HF_HUB_OFFLINE='1'
 $env:HF_DATASETS_OFFLINE='1'
-$env:FEATHERLENS_PREPARED_DIR=(Resolve-Path 'outputs/eda-stage3/classification-v1').Path
+$env:FEATHERLENS_PREPARED_DIR=(Resolve-Path 'outputs/classification-v1').Path
 .\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m pytest -q tests
 ```
 
 Offline execution requires the pinned source cache and verified preparation
 already present. Without `FEATHERLENS_PREPARED_DIR`, the real-data test is skipped.
-The complete suite passed 533 tests with no failures or skips in a source-only
-export using the existing environment/cache. The EDA-only command passed 384
-tests. Public metadata, caption and prepared-data commands reproduced the complete
-reports; the documented figure recipe reproduced all 13 groups. The unchanged
-image CLI passed a two-record smoke check; its full 5,994-image scan was verified
-during Stage 3. This was not a fresh dependency installation. Direct requirements are pinned; transitive dependencies are not
-fully locked. The verified runtime was Python 3.12.0, torch 2.14.1+cpu and
-torchvision 0.29.1+cpu on Windows.
+Post-merge verification on main `a8ab479` passed **533 tests with no failures or
+skips**, including cached real-data integration. All four complete reports and
+13 figure groups were independently regenerated from the identical reviewed code
+tree; all PNG hashes reproduced exactly and all PDFs rendered successfully.
+A fresh dependency installation was not repeated for this coordinator check.
+Direct requirements are pinned; transitive dependencies are not fully locked.
+The verified runtime was Windows Python 3.12.15, torch 2.14.1+cpu and
+torchvision 0.29.1+cpu.
 
 ## Reports and delivery bundle
 
-The local delivery is `outputs/eda-handoff-2026-10-22.zip`. It contains one matching
-report set, 13 PNG/PDF pairs, the two existing preparation files, documentation,
-verification records and a SHA-256 inventory. Reports come from the integrated
-October 22 verification; historical outputs remain preserved separately.
-Generated artifacts are transferred separately and are not committed to Git.
+The coordinator delivery is `outputs/task1-1-delivery-2026-10-22.zip`, distributed
+separately from Git. Extract it into `outputs/`; the archive contains the top-level
+folder `task1-1-delivery-2026-10-22/`. Start with its `DELIVERY.md`.
+
+This package uses independently regenerated and verified artifacts from the code
+merged by PR #9; the teammate's original ZIP was unavailable and was not inspected.
+`provenance.json` records the source revisions, reviewed head, equivalent merged
+main, seed, preprocessing and audit bindings. `inventory.json` records packaged
+file sizes and SHA-256 hashes.
+
+| Folder | Contents |
+| --- | --- |
+| `reports/` | One matching set of the four reports below |
+| `figures/` | Thirteen statistical figure groups, each PNG and PDF; includes galleries |
+| `preprocessing/` | Twelve training originals with fit/padding and training-flip examples, in two PNG/PDF sheets |
+| `preparation/` | Verified classification manifest and completion/provenance summary |
+| `audit/` | Coverage summary and exact-group summary; not the full row-level audit |
+| `docs/` | Findings, methods, shared contracts and team handoff |
+| `verification/` | Post-merge test output and verified numerical, batch and figure summaries |
+
+The final project-report PDF is a later project submission requirement. This
+internal Task 1.1 handoff supplies its data findings and figure material; it does
+not claim to complete the entire milestone or final project report.
 
 | Report under `reports/` | Schema | Content |
 | --- | --- | --- |
@@ -72,9 +93,16 @@ identify the actual supplied bytes.
 by SHA-256. Keep those files together; do not substitute an older image report.
 The bundle's `preparation/` contains `preparation.json` and
 `classification_manifest.jsonl`, consumed through the shared manifest loader.
-Audit fingerprints are recorded and were checked against the retained audit;
-the four audit files are not included. Obtain or regenerate them through the
-[shared audit](integrity_audit.md) if independent audit reproduction is needed.
+Audit fingerprints are recorded and checked against the retained full audit.
+The package includes `audit/summary.json` and `audit/exact_groups.jsonl`; it omits
+the larger row-level `images.jsonl` and `captions.jsonl`. The two preparation files
+are sufficient for `load_classification_manifest()` and CNN loading. Regenerate
+the full [shared audit](integrity_audit.md) before rerunning preparation; the
+packaged audit summaries alone are not preparation inputs.
+
+To use the supplied preparation instead of regenerating it, set
+`$env:FEATHERLENS_PREPARED_DIR=(Resolve-Path 'outputs/task1-1-delivery-2026-10-22/preparation').Path`
+for tests, and use that same directory in the classification batch example.
 
 Source revisions are fixed by [the contract](data_contract.md):
 
@@ -85,7 +113,7 @@ Source revisions are fixed by [the contract](data_contract.md):
 
 ## Reproduce reports
 
-Use the cache variables above, a verified preparation directory, and a fresh
+Use the same populated source cache, a verified preparation directory, and a fresh
 output directory. The metadata command streams the training source and may need
 network access even when an indexed cache exists. The remaining source commands
 use indexed loading. None opens the official test source for EDA.
@@ -97,7 +125,7 @@ $run='outputs/eda-final-reproduction'
 if (Test-Path -LiteralPath $run) { throw 'Choose a fresh output directory' }
 $reports=Join-Path $run 'reports'
 $figures=Join-Path $run 'figures'
-$prepared='outputs/eda-stage3/classification-v1'
+$prepared='outputs/classification-v1'
 .\.venv\Scripts\python.exe -m src.analysis.explore --full-training --split train --output "$reports/train-full.json"
 .\.venv\Scripts\python.exe -m src.visualization.eda_plots --report "$reports/train-full.json" --output-dir $figures
 .\.venv\Scripts\python.exe -m src.analysis.explore_images --output "$reports/train-images-full.json" --figures-dir $figures
@@ -105,13 +133,16 @@ $prepared='outputs/eda-stage3/classification-v1'
 .\.venv\Scripts\python.exe -m src.analysis.explore_prepared --prepared-dir $prepared --image-report "$reports/train-images-full.json" --caption-report "$reports/train-caption-details-full.json" --output "$reports/prepared-training-eda.json" --figures-dir $figures
 ```
 
+When using the packaged preparation, set the `$prepared` line above to
+`'outputs/task1-1-delivery-2026-10-22/preparation'`.
+
 Run one command at a time and stop if it fails. These commands preserve source
 assets and split membership. Regenerating image measurements reads all training
 pixels; it is unnecessary when only figures are needed.
 
 ## Regenerate figures from supplied reports
 
-Extract the delivery ZIP into `outputs/eda-handoff-2026-10-22/`. With the pinned
+Extract the delivery ZIP into `outputs/`, retaining its top-level folder. With the pinned
 training source cached, run this Python block from the repository root. It writes
 to a separate figure directory. Only the image galleries reopen a bounded set
 of source images; the other figures use saved report values.
@@ -126,7 +157,7 @@ from src.visualization.image_plots import generate_image_figures
 from src.visualization.caption_detail_plots import generate_caption_detail_figures
 from src.visualization.prepared_eda_plots import generate_prepared_eda_figures
 
-reports = Path("outputs/eda-handoff-2026-10-22/reports")
+reports = Path("outputs/task1-1-delivery-2026-10-22/reports")
 out = Path("outputs/eda-figure-check")
 read = lambda name: json.loads((reports / name).read_text(encoding="utf-8"))
 generate_training_figures(read("train-full.json"), out)
@@ -156,6 +187,6 @@ semantic-quality audits. Descriptive image means already exist for every class.
 Contrast is not a blur measurement. Supplied integrity flags do not certify
 annotation correctness or perceptual near-duplicate absence.
 
-The [README contribution proposal](eda_readme_proposal.md) is ready for
-coordination. The shared README, loader, cleaning, splitting and transform
-implementations are unchanged by this EDA handoff.
+The [README contribution proposal](eda_readme_proposal.md) is incorporated in
+the coordinator documentation follow-up. Shared loading, cleaning, splitting,
+transforms and statistical calculations remain unchanged.
