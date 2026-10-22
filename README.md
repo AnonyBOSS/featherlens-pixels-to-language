@@ -65,6 +65,10 @@ print(image.image_id, image.class_name, len(captions))
 
 Use `streaming=True` for sequential inspection. The default downloads and caches the source data for later random access. Images remain undecoded source references in this interface; classification transforms and PyTorch datasets are not implemented yet. See [the data contract](docs/data_contract.md) for exact fields, revision pins, and verification limits.
 
+### Native image access for analysis
+
+`read_source_image(source, source_row)` returns a raw indexed source row with a canonical image ID, original class metadata, native EXIF-corrected PIL RGB pixels, original/oriented dimensions, mode/profile/transparency facts, and recoverable failure status. It performs no resizing, filtering, training transforms, or source modification and requires no PyTorch or classification preparation. See [the shared image-access contract and training example](docs/image_access.md).
+
 ## Project structure
 
 ```text
