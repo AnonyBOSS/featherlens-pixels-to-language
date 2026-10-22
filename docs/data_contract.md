@@ -56,3 +56,7 @@ Live Hugging Face metadata reports 5,994 train and 5,794 test rows and matching 
 The Stage 1 synthetic tests cover identity, caption parsing, schema checks, ordered class-map agreement, pinned loader arguments, undecoded image references, and invalid labels. No full dataset scan is part of Stage 1.
 
 On October 21, 2026, a live `load_cub_sources(streaming=True)` smoke test read the first row from each pinned revision. Both exposed the same ordered 200-class mapping, produced ten linked caption records, and kept `image.decode` false. This is a two-row check, not a full dataset audit.
+
+## Native image access extension
+
+`src.data.image_io.read_source_image(source, source_row)` exposes native EXIF-corrected RGB pixels linked to the unchanged source identity and class mapping. The [image-access contract](image_access.md) documents dimensions, color/alpha/ICC behavior, raw-row scope, failure statuses, and optional audit joins. This extension does not change the Stage 1 record or caption fields.
