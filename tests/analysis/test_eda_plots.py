@@ -21,6 +21,7 @@ from src.visualization.eda_plots import (
     main,
 )
 import src.visualization.eda_plots as eda_plots
+import src.visualization.figure_export as figure_export
 
 
 @pytest.fixture
@@ -346,7 +347,7 @@ def test_mid_publication_failure_rolls_back_only_owned_files(
     previous_figures = set(plt.get_fignums())
     stub_renderers(monkeypatch)
     monkeypatch.setattr(Figure, "savefig", lambda figure, path, **kwargs: Path(path).write_bytes(b"new bytes"))
-    real_replace = eda_plots.os.replace
+    real_replace = figure_export.os.replace
     publication_calls = []
 
     def fail_fourth_publication(source, destination):
@@ -356,7 +357,7 @@ def test_mid_publication_failure_rolls_back_only_owned_files(
                 raise OSError("simulated publication failure")
         return real_replace(source, destination)
 
-    monkeypatch.setattr(eda_plots.os, "replace", fail_fourth_publication)
+    monkeypatch.setattr(figure_export.os, "replace", fail_fourth_publication)
     with pytest.raises(OSError, match="simulated publication"):
         generate_training_figures(report, output)
     assert len(publication_calls) == 4
@@ -385,13 +386,13 @@ def test_successful_publication_replaces_bundle_and_preserves_unrelated_files(
         rendered.append(path.name)
 
     monkeypatch.setattr(Figure, "savefig", fake_save)
-    real_replace = eda_plots.os.replace
+    real_replace = figure_export.os.replace
 
     def publish_after_complete_render(source, destination):
         assert len(rendered) == 8
         return real_replace(source, destination)
 
-    monkeypatch.setattr(eda_plots.os, "replace", publish_after_complete_render)
+    monkeypatch.setattr(figure_export.os, "replace", publish_after_complete_render)
     paths = generate_training_figures(report, output)
     assert paths == [output / f"{stem}.png" for stem in _STEMS]
     for stem in _STEMS:

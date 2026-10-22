@@ -11,8 +11,10 @@ Source: `Multimodal-Fatima/CUB_train` at revision
 `bd3988995e6db193427255abdebd522afe24ce76`, official `train` split. The iterator was
 exhausted and yielded **5,994 records**, matching the documented reference. The
 report is `outputs/eda/reports/train-full.json` (generated and Git-ignored).
-No official test records or source image pixels were analyzed. Shared loading,
-caption parsing, source text, and split definitions remain unchanged.
+No official test records were analyzed. The class/caption calculations below do
+not decode image pixels; the image section adds a separate complete training
+scan through the shared native-image adapter. Shared loading, caption parsing,
+source text, and split definitions remain unchanged.
 
 ### Class distribution and metadata coverage
 
@@ -138,20 +140,164 @@ is a redundancy definition, not a percentage of incorrect captions.
 
 **Figure:** `outputs/eda/figures/training_caption_repetition.png`.
 
-### Image measurement status and remaining work
+### Image access, coverage, and source representation
 
-RGB, brightness, contrast, saturation, and resolution definitions were approved.
-Pure NumPy measurement functions and synthetic formula tests are implemented.
-They accept native-resolution RGB arrays and do not decode images or apply
-color-mode, transparency, orientation, or validity policies. Their numerical
-tests do not constitute an actual source-image audit.
+Analysis date: October 22, 2026. These image findings complete the image portion
+of Stage 2. Commands and policies are in [Stage 2 instructions](eda_stage2.md).
+The generated report is `outputs/eda/reports/train-images-full.json`.
 
-Actual pixel distributions and image-derived preprocessing recommendations
-remain pending agreement on the existing pipeline's image-access and decoding
-status view. No source-wide image quality, resizing, normalization, or color-jitter
-conclusions are claimed from the class/caption analysis. The official test split
-remains reserved; future fitted preprocessing must use the derived training
-partition after validation splitting.
+**Question:** Can every official training image be accounted for using the shared
+native-image interface, and what representation do the measurements describe?
+
+**Method:** Visit every indexed row through
+`src.data.image_io.read_source_image`. Retain canonical identity, metadata errors,
+the original shared row/fetch/decode status, original/oriented geometry, mode,
+EXIF, transparency, and ICC facts. Apply the approved numerical functions to the
+adapter's native RGB8 arrays, giving each eligible image equal weight. No second
+decoder, source cleaning, or duplicate filtering is introduced.
+
+**Measured finding:** All **5,994 training rows** were attempted, decoded, and
+eligible for color measurement. There were zero row/fetch/decode failures, zero
+color exclusions, zero metadata errors, and zero unclassified rows. All 200
+species retain the same counts as the metadata report. Original modes were RGB
+for 5,990 images and L for four; the shared adapter converts the latter to RGB.
+No transparency metadata was observed. An ICC profile key was present in 3,004
+images and absent in 2,990; the shared display policy applies no ICC transform.
+Recorded EXIF orientations were 0 for 490 images, 1 for two, and absent for 5,502.
+No original/oriented dimension differences were observed.
+
+**Interpretation:** The raw training population is fully accounted for under
+this decoder and measurement policy. The measurements describe encoded display
+RGB, including the shared conversion of grayscale images. ICC-key presence is
+not evidence of profile validity or calibrated color. Zero decoding failures
+does not establish annotation correctness or overall training eligibility.
+
+**Recommendation:** Preserve the mode/profile facts and use an explicitly
+consistent color representation in later preprocessing. If the team changes
+ICC handling or the display policy, recompute appearance statistics for that
+representation. Keep missing/error categories explicit on later data versions.
+
+**Limitations:** The adapter's first-frame, EXIF, RGB8, and no-ICC policies define
+these results. The scan does not independently audit duplicates, leakage,
+semantic quality, or physical camera orientation. All raw source rows remain.
+
+### Image dimensions and resolution
+
+**Question:** How variable is native geometry, and what does that imply for
+future resizing discussions?
+
+**Method:** Summarize recorded original and oriented width/height pairs, pixel
+counts, megapixels, and width/height aspect ratios. Include every known pair,
+independently of RGB eligibility. No crop, resize, or model input size is selected.
+
+**Measured finding:** All 5,994 images have both dimension pairs. Original and
+oriented summaries agree in this scan:
+
+| Measurement | Minimum | Median | p95 | Maximum |
+| --- | ---: | ---: | ---: | ---: |
+| Width, pixels | 121 | 500 | 500 | 500 |
+| Height, pixels | 120 | 375 | 500 | 500 |
+| Aspect ratio, width/height | 0.4880 | 1.3333 | 1.5337 | 3.5971 |
+| Megapixels | 0.01946 | 0.17850 | 0.23650 | 0.25000 |
+
+The width and height medians are separate marginal summaries, not an observed
+joint median image shape. Mean image size is approximately 0.17940 megapixels.
+
+**Interpretation:** Source geometry varies, including portrait and wide views.
+A direct square stretch would change proportions by different amounts across
+images. The observed width and height are each bounded by 500 pixels in this
+source representation; no larger native detail can be inferred from these files.
+
+**Recommendation:** Discuss aspect-preserving resizing and padding with the data
+engineer, and inspect bird coverage before selecting a crop policy. Retain native
+source geometry in reports. The measurements do not select a model resolution.
+
+**Limitations:** Global dimensions do not measure the bird's bounding box,
+effective detail, or semantic completeness. No resize/crop experiment was run.
+
+**Figure:** `outputs/eda/figures/training_image_dimensions.png`.
+
+### Image brightness, contrast, saturation, and RGB
+
+**Question:** What appearance variation is present before model preprocessing?
+
+**Method:** Measure all native pixels in each eligible image. Brightness is mean
+encoded luma `Y = .299R + .587G + .114B`; contrast is population `std(Y)`; saturation
+is mean HSV S. RGB values are scaled by 255, and per-image RGB means and population
+standard deviations are recorded separately. Image-level summaries have equal
+image weighting and use the same linear percentile convention as caption EDA.
+
+**Measured finding:** Each distribution contains 5,994 image observations:
+
+| Measurement | Mean | Median | p05 | p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Brightness, mean Y | 0.4876 | 0.4834 | 0.2872 | 0.7032 |
+| Contrast, std(Y) | 0.1779 | 0.1737 | 0.0942 | 0.2767 |
+| Saturation, mean HSV S | 0.3140 | 0.2945 | 0.0801 | 0.6128 |
+
+Brightness ranges from 0.0823 to 0.9577, contrast from 0.0381 to 0.4166, and
+saturation from 0 to 0.9537. The averages of per-image R/G/B means are
+`[0.4856, 0.4994, 0.4324]`; the averages of their per-image standard deviations are
+`[0.1817, 0.1811, 0.1927]`.
+
+**Interpretation:** Images span a broad range of global appearance. These values
+combine birds, backgrounds, text, and other visible content. The channel averages
+describe this corpus under the specified display policy, not species-specific
+color or calibrated reflectance. Mean per-image standard deviation omits
+between-image mean differences and is not the corpus standard deviation.
+
+**Recommendation:** Keep the distributions and source-linked examples for
+preprocessing discussion. Recompute any fitted normalization on the eventual
+derived training partition, with its intended pixel weighting and image pipeline.
+Do not copy these descriptive image-weighted RGB summaries directly into model
+normalization or choose cleaning/jitter thresholds from these distributions alone.
+
+**Limitations:** Encoded luma is not physical luminance, and HSV saturation is not
+a perceptual color calibration. No bird mask, ICC transform, class-discriminative
+color study, augmentation experiment, or fitted threshold is included.
+
+**Figures:** `training_image_appearance.png` and `training_image_rgb.png` in
+`outputs/eda/figures/`.
+
+### Image examples and interpretation of extremes
+
+**Question:** What do selected images and numerical extremes actually look like?
+
+**Method:** Select the first eligible source row from six evenly spaced observed
+class groups. Separately select the minimum/maximum brightness, contrast, and
+saturation, breaking ties by source row and ID. Display actual shared-adapter
+pixels with a source caption and record its original caption index. Recheck
+identity, species labels, and measurements before gallery export.
+
+**Measured finding:** The class-spanning examples use source rows 0, 1200, 2400,
+3569, 4766, and 5964. Appearance extremes include:
+
+- Row 1196, Olive sided Flycatcher: highest brightness, 0.9577; the displayed
+  image has a large pale background around a darker bird.
+- Row 4270, Caspian Tern: lowest brightness, 0.0823; a bright bird is visible
+  against a predominantly dark background.
+- Row 4259, Caspian Tern: lowest contrast, 0.0381; the displayed bird is visible
+  against a relatively uniform blue sky.
+- Row 281, Red winged Blackbird: highest contrast, 0.4166.
+- Row 726, Pelagic Cormorant: lowest saturation, 0; the displayed image is grayscale.
+- Row 464, Painted Bunting: highest saturation, 0.9537; both the bird and the
+  prominent green background contribute to the displayed color.
+
+**Interpretation:** Global brightness/contrast can largely reflect background
+composition. A low score alone does not establish that the bird is unusable.
+The galleries also contain visible text/watermarks in some examples; this is a
+sample observation, not a measured dataset-wide watermark frequency.
+
+**Recommendation:** Share specific source IDs for human review before proposing
+quality exclusions. Preserve original captions and avoid inferring caption errors
+from a whole-image color mismatch. Use any later shared audit flags separately.
+
+**Limitations:** These selections are deterministic illustrations, not random
+samples, prevalence estimates, or a semantic validation of captions. Images may
+recur across different extremes. No automated quality labels are assigned.
+
+**Figures:** `training_image_gallery.png` and `training_image_extremes.png` in
+`outputs/eda/figures/`.
 
 ### Validation
 
@@ -162,17 +308,33 @@ report compatibility and count reconciliation, preservation of existing figures
 after invalid inputs or export failures, plot counts, and pure image formulas.
 Actual class/caption validation
 used all 5,994 training records, with 59,940 nonempty captions. Four figure groups
-were generated from the saved report as PNG and PDF; plotting does not reopen
-the source. The source decoder, actual pixel measurements, and pipeline cleaning
-policies are not validated by these synthetic image-formula tests.
+were generated from the saved report as PNG and PDF; those class/caption plotting
+functions do not reopen the source.
 
-During PR preparation, both saved reports were preserved byte-for-byte against
+After integrating the completed shared image interface, the base suite passed
+182 tests. With the image consumer, aggregation, plotting, and regression cases,
+the complete suite passed **316 tests**, including final source-coverage,
+identity, and class-mapping regression cases. The actual image scan accounted for all
+5,994 training rows and generated five additional PNG/PDF figure groups. An
+independent numerical check reread 15 selected training records, including fixed
+rows, gallery examples, and extrema. Alternative float64 reduction formulas agreed
+within absolute tolerance `1e-10`; the largest observed difference was approximately
+`1.88e-12`. All saved aggregate summaries reconcile to the recorded measurement
+rows, and class counts match the earlier training metadata report.
+
+All five image PNGs were visually inspected for readable labels, displayed source
+pixels, and caption layout. The two prior JSON reports and eight prior figure
+files remain byte-identical to the pre-image-stage backup. The official test split
+was not opened. These checks do not establish semantic caption correctness,
+absence of near duplicates/leakage, or model suitability of a cleaning policy.
+
+During the earlier class/caption PR preparation, both saved reports were preserved byte-for-byte against
 a verified backup. The full-training figure pairs were regenerated from the
 saved schema `1.1` report, with unchanged PNG pixels and measured conclusions.
 The historical prefix report uses schema `1.0`; it remains preserved as evidence
 but is rejected before figure publication because it lacks required plotting
 distributions. Regenerate it with the current builder before plotting. These
-checks reused saved evidence; they did not repeat the dataset scan.
+checks reused saved evidence; they did not repeat that metadata/caption dataset scan.
 
 ## Stage 1: preliminary training-prefix exploration
 

@@ -3,8 +3,9 @@
 This stage measures the complete official training source through the existing
 `load_cub_split("train", streaming=True)` interface. The source contract, loader,
 caption parser, shared README, official splits, and cleaning policies are unchanged.
-It also provides pure image-statistics functions using the approved definitions;
-source-image integration remains pending the decoding and failure-handling policy.
+It also measures actual training images through the shared
+`src.data.image_io.read_source_image` interface and generates image figures and
+captioned galleries. The approved numerical definitions remain unchanged.
 
 ## Reproduce the measured training report
 
@@ -97,29 +98,114 @@ values already in `[0, 1]`. It uses every pixel and never modifies the input.
 
 These functions do not decode files, apply EXIF orientation, resolve transparency,
 convert color modes, identify corrupt images, or choose validity thresholds.
-Their dimensions describe the supplied array; an adapter must preserve native
-geometry and separately record original versus oriented dimensions. No source
-image measurements or image-derived preprocessing recommendations are claimed
-in this stage's findings.
+Their dimensions describe the supplied array. The shared adapter preserves native
+geometry and separately reports original versus oriented dimensions. The image
+consumer records both, including any header geometry retained on failures.
 
 Future dataset summaries should weight each eligible image equally. That is
 different from pooling every pixel to estimate normalization parameters. Any
 normalization, vocabulary, threshold, or augmentation policy must be fitted or
 selected using the eventual derived training partition after validation splitting.
 
-## Remaining data-interface agreement
+## Run the training-image analysis
 
-Before running pixel analysis, agree on an image-access view providing:
+The [shared image-access contract](image_access.md) is now available. From the
+repository root, using the same EDA environment and cache:
 
-- Canonical `image_id` and existing class/source provenance.
-- Original dimensions, original mode, orientation handling, and any RGB conversion.
-- Explicit decoding status and reason; failed images remain in attempted counts.
-- Transparency/color-mode eligibility policy and available shared quality flags.
+```powershell
+$env:HF_HOME=Join-Path (Get-Location).Path '.venv\hf-cache'
+$env:HF_DATASETS_CACHE=Join-Path $env:HF_HOME 'datasets'
+$env:HF_HUB_CACHE=Join-Path $env:HF_HOME 'hub'
+$env:MPLBACKEND='Agg'
+$env:MPLCONFIGDIR=Join-Path (Get-Location).Path '.venv\mpl-cache'
+.\.venv\Scripts\python.exe -m src.analysis.explore_images --split train --figures-dir outputs/eda/figures
+```
 
-This is a consumer requirement for the existing contract, not a second source
-loader or an implemented corruption/cleaning pipeline. No shared interface has
-been changed. Image integration, quality flags, and later derived split manifests
-remain coordination points with the data pipeline.
+The default visits every indexed official training row. Use `--limit 32` for an
+explicitly nonrandom preliminary prefix. Both the command and report builder
+reject held-out sources before reading images. Iterator/adapter programming
+errors abort completion; recoverable shared row/fetch/decode failures remain
+records with their original statuses and reasons.
+
+The full report is `outputs/eda/reports/train-images-full.json`, using schema
+`image-eda-1.0`. It retains every attempted identity, class metadata, shared
+status, original/oriented dimensions, mode, EXIF/transparency/ICC facts, analysis
+eligibility, per-image measurements, source provenance, and aggregate summaries.
+It is saved before optional gallery rendering, so a rendering failure does not
+discard a completed measurement scan. JSON publication uses a temporary sibling
+file and replacement; invalid serialization or failed replacement preserves an
+existing report.
+
+Before rendering, saved reports must reconcile the declared indexed source size,
+complete or prefix row coverage, per-row source provenance, canonical image IDs,
+and class mapping. Gallery preparation also checks the current source size and
+class mapping against the report before reading selected images.
+
+### Shared pixels and analysis eligibility
+
+Fetching, complete decoding, EXIF correction, and RGB conversion belong to the
+shared adapter. The analysis does not implement a second decoder or change any
+shared source, contract, validity flag, cleaning rule, or split.
+
+- The adapter returns native oriented RGB8 pixels without resizing or ICC color
+  management. Its white-alpha display policy is preserved, not reapplied.
+- Color measurements require shared status `ok`, no original transparency
+  metadata, and original mode `1`, `L`, `P`, `RGB`, `CMYK`, or `YCbCr`.
+- Transparent or unsupported numeric modes are retained with analysis status
+  `unsupported_mode` and a specific exclusion reason. This is a color-analysis
+  eligibility decision, not an image-invalidity or classification-exclusion rule.
+- Original and oriented resolution summaries include every available dimension
+  pair, including header facts retained on failures. Each denominator is explicit.
+- Missing class metadata remains in global image summaries and has a separate
+  unclassified count; it is not assigned to an invented species.
+- Every returned PIL image is closed. Only small selected gallery arrays remain
+  in memory after measurement; no dataset-wide decoded-image cache is built.
+
+Global appearance summaries give each eligible image equal weight. The means of
+per-image RGB means or standard deviations are descriptive; they are not pooled
+pixel normalization estimates. Raw source duplicates remain in this population.
+
+### Image figure groups
+
+Each group is exported as PNG and PDF using the same staged-render/publication
+helper as the class/caption figures. All ten new image-figure files render before
+any of their existing targets are replaced; unrelated figures remain untouched.
+
+| Figure stem | Purpose |
+| --- | --- |
+| `training_image_dimensions` | Original width/height scatter, oriented aspect ratios, and native megapixels, with geometry-availability denominators. |
+| `training_image_appearance` | Per-image brightness, contrast, and saturation distributions with fixed, documented units. |
+| `training_image_rgb` | R/G/B per-image mean distributions on matched 0–1 axes. |
+| `training_image_gallery` | Illustrative images from evenly spaced observed class IDs, using the first eligible source row in each selected class. |
+| `training_image_extremes` | Lowest/highest brightness, contrast, and saturation examples, with source-order tie breaking. Images can recur. |
+
+Galleries use actual shared-adapter pixels and a source caption with its original
+caption index. The controller verifies saved identity, class labels, and metrics
+against the selected images before publication. Galleries are illustrative, not
+random samples or semantic-quality audits. Extreme measurements are not automatic
+quality failures.
+
+To regenerate figures from saved measurements without scanning every image again,
+run this Python code from the repository root in the EDA environment:
+
+```python
+import json
+from pathlib import Path
+from src.data.source import load_cub_split
+from src.analysis.explore_images import prepare_gallery
+from src.visualization.image_plots import generate_image_figures
+
+report = json.loads(Path("outputs/eda/reports/train-images-full.json").read_text(encoding="utf-8"))
+source = load_cub_split("train")
+pixels = prepare_gallery(report, source)
+generate_image_figures(report, "outputs/eda/figures", image_getter=pixels)
+```
+
+Only the selected gallery images are decoded and checked again. Plotting functions
+consume the saved measurements, and do not fit thresholds or preprocessing.
+
+Audit quality flags and future derived train/validation manifests remain later
+integration inputs. The official test split remains reserved for final evaluation.
 
 ## Tests
 
@@ -131,7 +217,11 @@ Synthetic tests check full iterator exhaustion, reference-count mismatches,
 interrupted scans, training-only command and builder guards, saved-frequency
 reconciliation, plotted counts and labels, report compatibility, preservation of
 existing figures after invalid inputs or export failures, figure cleanup, and the approved
-image formulas on hand-computable arrays. They do not download the dataset.
-Actual training-record validation is performed separately by the complete scan.
-Image-formula tests establish numerical behavior, not compatibility with every
-source image mode or decoding policy.
+image formulas on hand-computable arrays. Image-consumer tests use the actual
+shared adapter on tiny in-memory images, checking native EXIF dimensions, explicit
+failures, color exclusions, nullable classes, source identity, image closure,
+gallery consistency, and retention of a report after figure failure. They do not
+download the dataset.
+Actual image-record validation is performed separately by the complete training
+scan and selected-record numerical checks. Synthetic tests do not establish
+semantic image/caption accuracy or suitability of every possible source mode.

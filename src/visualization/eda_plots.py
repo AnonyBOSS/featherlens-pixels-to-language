@@ -11,12 +11,11 @@ import argparse
 from collections.abc import Mapping
 import json
 import math
-import os
 from pathlib import Path
-import shutil
-import tempfile
 import textwrap
 from typing import Any
+
+from .figure_export import save_figure_bundle
 
 
 _BLUE = "#2563a6"
@@ -455,98 +454,17 @@ def create_caption_repetition_figure(report: Mapping[str, Any]):
 
 
 def generate_training_figures(report: Mapping[str, Any], output_dir: str | Path) -> list[Path]:
-    """Save four PNG figures plus vector PDFs, returning the PNG paths.
-
-    Titles distinguish verified complete training from selected records. Test
-    reports and incompatible schemas are rejected before filesystem changes.
-    All eight files render in a temporary directory before publication. Existing
-    target files have backups and are restored on publication failure; unrelated
-    files are preserved. This is not a power-loss-atomic directory transaction.
-    """
+    """Validate a saved training report, then publish four PNG/PDF pairs safely."""
     _validate_training_report(report)
-    destination = Path(output_dir)
-    if destination.exists() and not destination.is_dir():
-        raise ValueError("output_dir must be a directory")
-    staging_parent = destination.absolute().parent
-    while not staging_parent.exists():
-        staging_parent = staging_parent.parent
-    if not staging_parent.is_dir():
-        raise ValueError("The existing output parent must be a directory")
-    staging = Path(tempfile.mkdtemp(prefix=".eda-figures-", dir=staging_parent)).resolve()
-    if staging.parent != staging_parent.resolve():
-        raise RuntimeError("Unexpected temporary figure directory location")
-    rendered = staging / "rendered"
-    previous = staging / "previous"
     figures = (
         ("training_class_distribution", create_class_distribution_figure),
         ("training_caption_lengths", create_caption_length_figure),
         ("training_caption_vocabulary", create_vocabulary_figure),
         ("training_caption_repetition", create_caption_repetition_figure),
     )
-    names = [f"{name}.{extension}" for name, _ in figures for extension in ("png", "pdf")]
-    retain_backups = False
-    try:
-        rendered.mkdir()
-        previous.mkdir()
-        plt = _pyplot()
-        for name, create in figures:
-            before = set(plt.get_fignums())
-            try:
-                figure = create(report)
-                figure.savefig(rendered / f"{name}.png", dpi=200, bbox_inches="tight")
-                figure.savefig(rendered / f"{name}.pdf", bbox_inches="tight")
-            finally:
-                for identifier in set(plt.get_fignums()) - before:
-                    plt.close(identifier)
-        if any(not (rendered / name).is_file() or (rendered / name).stat().st_size == 0 for name in names):
-            raise OSError("All eight figure files must render successfully before publication")
-
-        # Preserve each existing target before replacing any member of the bundle.
-        existing = set()
-        for name in names:
-            target = destination / name
-            if target.is_symlink() or (target.exists() and not target.is_file()):
-                raise ValueError(f"Figure target must be a regular file: {target}")
-            if target.exists():
-                shutil.copy2(target, previous / name)
-                existing.add(name)
-        created_directories = []
-        parent = destination
-        while not parent.exists():
-            created_directories.append(parent)
-            parent = parent.parent
-        published = []
-        try:
-            destination.mkdir(parents=True, exist_ok=True)
-            for name in names:
-                os.replace(rendered / name, destination / name)
-                published.append(name)
-        except BaseException as publication_error:
-            rollback_errors = []
-            for name in reversed(published):
-                try:
-                    if name in existing:
-                        os.replace(previous / name, destination / name)
-                    else:
-                        (destination / name).unlink()
-                except BaseException as rollback_error:
-                    rollback_errors.append(rollback_error)
-            for directory in created_directories:
-                try:
-                    directory.rmdir()  # Only remove empty directories created here.
-                except OSError:
-                    pass
-            if rollback_errors:
-                retain_backups = True
-                raise RuntimeError(
-                    f"Figure publication failed and rollback was incomplete; prior files remain in {previous}"
-                ) from publication_error
-            raise
-        return [destination / f"{name}.png" for name, _ in figures]
-    finally:
-        if not retain_backups:
-            # This exact, verified temporary directory was created by this call.
-            shutil.rmtree(staging)
+    return save_figure_bundle(
+        [(name, lambda create=create: create(report)) for name, create in figures], output_dir,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
