@@ -2,10 +2,12 @@
 
 import json
 import math
+import os
 from collections.abc import Iterable, Mapping
 from numbers import Real
 from pathlib import Path
 from statistics import fmean
+import tempfile
 from typing import Any
 
 
@@ -51,5 +53,16 @@ def write_json_report(report: Mapping[str, Any], output: str | Path) -> Path:
     serialized = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
     path = Path(output)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(serialized + "\n", encoding="utf-8")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", newline="\n", dir=path.parent,
+            prefix=f".{path.name}-", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(serialized + "\n")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
     return path

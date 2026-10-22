@@ -3,6 +3,7 @@ import json
 import pytest
 
 from src.analysis.reporting import summarize_numbers, write_json_report
+import src.analysis.reporting as reporting
 
 
 def test_summary_uses_linear_quantiles_and_handles_singletons():
@@ -42,3 +43,23 @@ def test_json_output_roundtrips_unicode_and_rejects_nan_before_writing(tmp_path)
     with pytest.raises(ValueError):
         write_json_report({"bad": float("nan")}, output)
     assert json.loads(output.read_text(encoding="utf-8")) == report
+
+
+def test_failed_report_publication_keeps_previous_report_and_cleans_temporary_file(tmp_path, monkeypatch):
+    output = tmp_path / "report.json"
+    write_json_report({"valid": "previous"}, output)
+    before = output.read_bytes()
+    def fail_replace(*args):
+        raise OSError("simulated publication failure")
+    monkeypatch.setattr(reporting.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated publication"):
+        write_json_report({"valid": "new"}, output)
+    assert output.read_bytes() == before
+    assert list(tmp_path.iterdir()) == [output]
+
+
+def test_invalid_report_does_not_create_a_directory(tmp_path):
+    directory = tmp_path / "absent"
+    with pytest.raises(ValueError):
+        write_json_report({"bad": float("inf")}, directory / "report.json")
+    assert not directory.exists()
