@@ -106,6 +106,21 @@ parameters using only the 4,794 derived training records.**
 
 ### Available classification data pipeline
 
+The EDA team's reviewed split metadata is now shared in
+[`preparation/`](preparation/README.md). Both classification approaches can load
+the same snapshot immediately after cloning, without regenerating the split:
+
+```python
+from src.data.preparation import load_classification_manifest
+
+rows = load_classification_manifest("preparation")
+```
+
+The snapshot contains 4,794 training, 1,200 validation, and 5,794 official test
+records. It includes provenance and a runnable batch example, but no image
+assets. The ResNet-50 configuration points to this directory. To regenerate a
+working preparation from a full audit instead, use an ignored output directory:
+
 ```python
 from src.data.preparation import prepare_classification, load_classification_manifest
 
@@ -118,7 +133,7 @@ Verified preparation produced **4,794 training, 1,200 validation, and 5,794 offi
 
 The lazy Dataset returns `{"image": tensor, "label": class_id, "image_id": stable_id}`. Default preprocessing fits the entire EXIF-corrected RGB image into a centered white 224×224 canvas, preserving aspect ratio within pixel rounding. Horizontal flipping applies only to training. Normalization is configurable; the earlier crop profile is an explicit alternative. Real CPU batches, loss/backpropagation, and Windows two-worker loading have been verified.
 
-Use Python 3.12 and [requirements-classification.txt](requirements-classification.txt) for the verified environment. See [the classification handoff](docs/classification_data.md) for installation, eligibility policy, split provenance, model-specific normalization, a Windows-safe batch example, and verification limits. Generated audits, preparation manifests, environments, and previews remain ignored by Git.
+Use Python 3.12 and [requirements-classification.txt](requirements-classification.txt) for the verified environment. See [the classification handoff](docs/classification_data.md) for installation, eligibility policy, split provenance, model-specific normalization, a Windows-safe batch example, and verification limits. Generated working artifacts under `outputs/`, environments, and caches remain ignored by Git; the reviewed shared `preparation/` snapshot is intended to be versioned.
 
 ## Project structure
 
@@ -128,6 +143,7 @@ pixels-to-language/
 ├── docs/                 # Technical documentation and research notes
 ├── notebooks/            # Exploratory analysis and experiments
 ├── outputs/              # Generated figures, logs, and checkpoints (gitignored)
+├── preparation/          # Reviewed shared classification split and provenance
 ├── src/
 │   ├── data/             # Dataset loading and preprocessing
 │   ├── analysis/         # Statistical EDA and report generation
