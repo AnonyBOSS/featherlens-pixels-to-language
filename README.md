@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, a complete read-only integrity audit, the classification data pipeline, and full statistical EDA are implemented. The model architecture and experiments described below remain planned; model training, inference, and evaluation are not implemented yet.
+> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, a complete read-only integrity audit, the classification data pipeline, and full statistical EDA are implemented. The pretrained CNN foundation adds ConvNeXt-Tiny, EfficientNet-B3, and RegNetY-3.2GF adapters, 200-class heads, reusable encoder features, fine-tuning policies, and prepared train/validation loaders. Actual pretrained-weight execution and GPU verification remain Stage 1B work; training workflows, prediction CLI, and evaluation are not implemented yet.
 
 ## Overview
 
@@ -120,6 +120,24 @@ The lazy Dataset returns `{"image": tensor, "label": class_id, "image_id": stabl
 
 Use Python 3.12 and [requirements-classification.txt](requirements-classification.txt) for the verified environment. See [the classification handoff](docs/classification_data.md) for installation, eligibility policy, split provenance, model-specific normalization, a Windows-safe batch example, and verification limits. Generated audits, preparation manifests, environments, and previews remain ignored by Git.
 
+### Available pretrained CNN foundation
+
+The Stage 1A adapters expose a shared classification and encoder interface for **ConvNeXt-Tiny, EfficientNet-B3, and RegNetY-3.2GF**. Each model produces 200 logits in the unchanged CUB class order and exposes spatial and pooled encoder features. Frozen, partial, and full fine-tuning policies preserve their parameter and normalization behavior across mode changes. A spatial target reference is available for future Grad-CAM integration; rendering remains planned.
+
+```python
+import torch
+
+from src.models.pretrained import ModelConfig, create_pretrained_model
+
+config = ModelConfig(architecture="convnext_tiny", fine_tuning="frozen")
+model = create_pretrained_model(config, load_weights=False).eval()
+with torch.no_grad():
+    logits = model(torch.zeros(1, 3, 224, 224))
+print(logits.shape)  # torch.Size([1, 200])
+```
+
+`load_weights=False` constructs an offline, randomly initialized encoder; it does not demonstrate pretrained quality. The default construction requests an explicit pinned torchvision weight enum and propagates loading errors. The prepared-data helper preserves the full-image 224-pixel fit profile and applies configurable normalization once; native weight crop recipes are metadata. See [the pretrained CNN guide](docs/pretrained_cnn_foundation.md) for exact weights, shapes, policy transitions, portable CPU setup, data integration, and verification limits.
+
 ## Project structure
 
 ```text
@@ -143,7 +161,7 @@ pixels-to-language/
 └── README.md
 ```
 
-Model, training and evaluation implementations remain planned. Statistical analysis and EDA visualization modules are available. The repository intentionally contains no model implementations or runnable training commands at this stage.
+Model adapters, classification data integration, statistical analysis, and EDA visualization modules are available. Training workflows, evaluation, and runnable training commands remain planned.
 
 ## Getting started
 
@@ -174,7 +192,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements-eda.txt
 ```
 
-> For classification data and the complete repository test suite, follow [the pinned CPU setup and batch example](docs/classification_data.md). EDA-only tests run with `python -m pytest -q tests/analysis`; complete tests also require the classification dependencies. The broader `requirements.txt` remains an anticipated model-training dependency list. Training and prediction commands are not implemented.
+> For classification data, pretrained CNN adapters, and the complete repository test suite, follow [the pinned CPU setup](docs/pretrained_cnn_foundation.md#cpu-development-setup). EDA-only tests run with `python -m pytest -q tests/analysis`; complete tests also require the classification dependencies. The broader `requirements.txt` remains an anticipated model-training dependency list. Training and prediction commands are not implemented.
 
 ### Planned CLI
 
@@ -194,6 +212,7 @@ The actual commands and configuration files will be documented once the correspo
 ## Development roadmap
 
 - [x] **Data foundation:** Statistical EDA, source-preserving caption preparation, integrity audit, reproducible splits, transforms, and classification augmentation
+- [x] **Pretrained CNN foundation:** Three model adapters, 200-class heads, encoder features, fine-tuning policies, and prepared train/validation integration; verified on CPU without pretrained weights
 - [ ] **Classification:** CNN baseline trained from scratch, transfer learning, and model comparison
 - [ ] **Optimization and explainability:** Grid search, random search, experiment tracking, and Grad-CAM
 - [ ] **Colorization:** Grayscale-to-color encoder–decoder model
