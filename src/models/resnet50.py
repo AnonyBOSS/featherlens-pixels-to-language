@@ -1,5 +1,5 @@
 """ResNet-50 classification with a reusable visual encoder."""
-
+from __future__ import annotations
 
 from collections import OrderedDict
 from typing import Literal
@@ -40,7 +40,7 @@ class ResNet50Classifier(nn.Module):
             )
         )
         self.pool = backbone.avgpool
-       classifier self. = nn.Linear(self.feature_dim, num_classes)
+        self.classifier = nn.Linear(self.feature_dim, num_classes)
 
         self.set_stage("head")
 
