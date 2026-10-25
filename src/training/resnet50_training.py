@@ -1,7 +1,11 @@
 """Building blocks for ResNet-50 classification training."""
 
+import json
 import math
-from dataclasses import dataclass
+import os
+import tempfile
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -158,3 +162,70 @@ def validate_one_epoch(
         accuracy=correct / samples,
         samples=samples,
     )
+
+
+def save_checkpoint(
+    path: str | Path,
+    *,
+    model: ResNet50Classifier,
+    optimizer: Optimizer,
+    epoch: int,
+    val_metrics: EpochMetrics,
+    best_val_accuracy: float,
+    config: dict[str, object],
+) -> None:
+    """Save a checkpoint after a completed training epoch.
+
+    Epoch is one-based within the current stage. Config must contain
+    JSON-compatible settings. The caller decides whether this is best
+    or latest and supplies the matching optimizer for the current stage.
+    """
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+        raise ValueError("epoch must be a positive integer.")
+
+    if (
+        val_metrics.samples < 1
+        or not math.isfinite(val_metrics.loss)
+        or val_metrics.loss < 0
+        or not 0 <= val_metrics.accuracy <= 1
+    ):
+        raise ValueError("Validation metrics must be finite and valid.")
+
+    if not val_metrics.accuracy <= best_val_accuracy <= 1:
+        raise ValueError(
+            "best_val_accuracy must be between current validation accuracy and 1."
+        )
+
+    checkpoint = {
+        "schema_version": 1,
+        "num_classes": model.classifier.out_features,
+        "stage": model.stage,
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "val_metrics": asdict(val_metrics),
+        "best_val_accuracy": best_val_accuracy,
+        "config": json.loads(json.dumps(config, allow_nan=False)),
+    }
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            torch.save(checkpoint, temporary_file)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
