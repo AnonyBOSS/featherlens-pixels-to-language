@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, a complete read-only integrity audit, the classification data pipeline, and full statistical EDA are implemented. The model architecture and experiments described below remain planned; model training, inference, and evaluation are not implemented yet.
+> **Development status:** Revision-pinned CUB source loading, the integrity audit, the classification data pipeline, and full statistical EDA are implemented. The ResNet-50 runner supports two-stage training, local MLflow tracking, checkpoint saving, selective fine-tuning and Mixup. Baseline/regularization experiments and logistic/discriminant classifier refits have validation reports and local exports. Two earlier exports have official-test evaluations. Formal grid/random search, a shared inference CLI, scratch-CNN integration, colorization, and captioning remain. See [training commands](docs/resnet50_training.md), [initial regularization results](docs/resnet50_regularization_results.md), [pipeline review and latest validation candidates](docs/resnet50_pipeline_review.md), and [earlier test results](docs/resnet50_test_results.md). CUB/ImageNet pretraining overlap is a known benchmark limitation and has not been audited here.
 
 ## Overview
 

@@ -30,7 +30,7 @@ training:
     classifier_learning_rate: 0.0001
 
 checkpoints:
-  # Upload selected checkpoints to Google Drive manually after training.
+  # Upload each completed experiment's trained models to Google Drive manually.
   local_root: outputs/resnet50
   selection_metric: val_accuracy
 

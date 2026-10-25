@@ -1,6 +1,7 @@
 
 
 import argparse
+import math
 import random
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,9 @@ from src.data.classification import (
 )
 from src.data.preparation import load_classification_manifest
 from src.data.source import load_cub_split
-from src.data.transforms import IMAGENET_NORMALIZATION, classification_transform
+from src.data.resnet50_transforms import resnet50_transform
 from src.models.resnet50 import ResNet50Classifier
+from src.training.resnet50_experiment import run_experiment
 
 
 def _validate_seed(seed: object) -> None:
@@ -38,7 +40,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("The configuration must be a YAML mapping.")
 
-    for section in ("experiment", "training", "model", "data"):
+    for section in ("experiment", "training", "model", "data", "tracking", "checkpoints"):
         if not isinstance(config.get(section), dict):
             raise ValueError(f"Configuration section {section!r} must be a mapping.")
 
@@ -64,6 +66,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
     weights = config["model"].get("weights")
     if not isinstance(weights, str) or weights not in ResNet50_Weights.__members__:
         raise ValueError("model.weights must name pretrained ResNet50_Weights.")
+    if config["model"].get("finetune_scope", "layer4") not in ("layer4", "last_block"):
+        raise ValueError("model.finetune_scope must be 'layer4' or 'last_block'.")
 
     prepared_dir = config["data"].get("prepared_dir")
     if not isinstance(prepared_dir, str) or not prepared_dir.strip():
@@ -72,6 +76,77 @@ def load_config(path: str | Path) -> dict[str, Any]:
         raise ValueError("data.geometry must be 'fit' or 'crop'.")
     if config["data"].get("normalization") != "imagenet":
         raise ValueError("This runner supports data.normalization: imagenet.")
+    if config["data"].get("augmentation", "baseline") not in ("baseline", "mild", "spatial"):
+        raise ValueError("data.augmentation must be 'baseline', 'mild' or 'spatial'.")
+    if config["data"].get("augmentation") == "spatial" and config["data"]["geometry"] != "fit":
+        raise ValueError("Spatial augmentation requires data.geometry: fit.")
+    for name, value in (
+        ("model.dropout", config["model"].get("dropout", 0.0)),
+        ("training.label_smoothing", config["training"].get("label_smoothing", 0.0)),
+    ):
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not 0 <= value < 1
+        ):
+            raise ValueError(f"{name} must be a finite probability in [0, 1).")
+
+    if config["training"].get("optimizer") != "adamw":
+        raise ValueError("training.optimizer must be 'adamw'.")
+    if config["tracking"].get("backend") != "mlflow":
+        raise ValueError("tracking.backend must be 'mlflow'.")
+    if config["checkpoints"].get("selection_metric") != "val_accuracy":
+        raise ValueError("checkpoints.selection_metric must be 'val_accuracy'.")
+    for section, field in (("tracking", "local_dir"), ("checkpoints", "local_root")):
+        value = config[section].get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{section}.{field} must be a non-empty path string.")
+
+    rates = {"training.weight_decay": config["training"].get("weight_decay")}
+    for stage, fields in (
+        ("head", ("learning_rate",)),
+        ("finetune", ("classifier_learning_rate", "encoder_learning_rate")),
+    ):
+        settings = config["training"].get(stage)
+        if not isinstance(settings, dict):
+            raise ValueError(f"training.{stage} must be a mapping.")
+        epochs = settings.get("epochs")
+        if isinstance(epochs, bool) or not isinstance(epochs, int) or epochs < 1:
+            raise ValueError(f"training.{stage}.epochs must be a positive integer.")
+        smoothing = settings.get("label_smoothing", config["training"].get("label_smoothing", 0.0))
+        if (
+            isinstance(smoothing, bool) or not isinstance(smoothing, (int, float))
+            or not 0 <= smoothing < 1
+        ):
+            raise ValueError(f"training.{stage}.label_smoothing must be in [0, 1).")
+        mixup = settings.get("mixup_alpha", 0.0)
+        if (
+            isinstance(mixup, bool) or not isinstance(mixup, (int, float))
+            or not math.isfinite(mixup) or mixup < 0
+        ):
+            raise ValueError(f"training.{stage}.mixup_alpha must be finite and non-negative.")
+        for field in fields:
+            rates[f"training.{stage}.{field}"] = settings.get(field)
+    for name, value in rates.items():
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0
+            or (value == 0 and name != "training.weight_decay")
+        ):
+            raise ValueError(f"{name} must be finite and positive (weight decay may be zero).")
+
+    stopping = config["training"]["finetune"].get("early_stopping")
+    if stopping is not None:
+        if not isinstance(stopping, dict):
+            raise ValueError("training.finetune.early_stopping must be a mapping.")
+        patience = stopping.get("patience")
+        if isinstance(patience, bool) or not isinstance(patience, int) or patience < 1:
+            raise ValueError("early_stopping.patience must be a positive integer.")
+        delta = stopping.get("min_delta", 0.0)
+        if (
+            isinstance(delta, bool) or not isinstance(delta, (int, float))
+            or not math.isfinite(delta) or delta < 0
+        ):
+            raise ValueError("early_stopping.min_delta must be finite and non-negative.")
 
     return config
 
@@ -122,11 +197,11 @@ def prepare_training(
             source,
             rows,
             partition=partition,
-            transform=classification_transform(
+            transform=resnet50_transform(
                 training=partition == "train",
                 image_size=data["image_size"],
                 geometry=data["geometry"],
-                normalization=IMAGENET_NORMALIZATION,
+                augmentation=data.get("augmentation", "baseline"),
             ),
         )
         for partition in ("train", "val")
@@ -144,6 +219,8 @@ def prepare_training(
     model = ResNet50Classifier(
         num_classes=config["model"]["num_classes"],
         weights=weights,
+        dropout=config["model"].get("dropout", 0.0),
+        finetune_scope=config["model"].get("finetune_scope", "layer4"),
     ).to(device)
 
     return model, loaders
@@ -195,10 +272,21 @@ def main() -> None:
         default=Path("configs/resnet50.yaml"),
         help="YAML configuration path; run from the repository root.",
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument(
+        "--train",
+        action="store_true",
+        help="Run the full two-stage training experiment from the configuration.",
+    )
+    modes.add_argument(
         "--check-batch",
         action="store_true",
         help="Check one validation batch without training.",
+    )
+    modes.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Train one epoch per stage on at most eight images per partition.",
     )
     args = parser.parse_args()
 
@@ -216,22 +304,30 @@ def main() -> None:
                 device,
                 image_size=config["data"]["image_size"],
             )
+        else:
+            run_experiment(model, loaders, config, device, smoke_test=args.smoke_test)
+    except KeyboardInterrupt:
+        parser.exit(130, "Training interrupted; completed-epoch checkpoints were kept.\n")
     except (OSError, yaml.YAMLError, ValueError, RuntimeError) as error:
         parser.error(str(error))
 
     print(f"Configuration: {args.config.resolve()}")
-    print(f"Experiment: {config['experiment']['name']}")
+    experiment_name = config["experiment"]["name"] + ("_smoke" if args.smoke_test else "")
+    print(f"Experiment: {experiment_name}")
     print(f"Seed: {config['experiment']['seed']}")
     print(f"Device: {device}")
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(device)}")
     for partition, loader in loaders.items():
-        print(f"{partition}: {len(loader.dataset)} images")
+        print(f"Available {partition}: {len(loader.dataset)} images")
     if batch_shapes is not None:
         for name, shape in batch_shapes.items():
             print(f"{name}: {shape}")
         print("Batch check passed. No weights were updated.")
-    print("Data and model are ready. Training is not connected yet.")
+    else:
+        print("Experiment completed. See its printed checkpoint directory and MLflow run.")
+        if args.smoke_test:
+            print("Smoke mode used at most eight images per partition; scores are not evaluation results.")
 
 
 if __name__ == "__main__":

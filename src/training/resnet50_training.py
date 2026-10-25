@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
+import numpy as np
 from torch import nn
 from torch.optim import AdamW, Optimizer
 from torch.utils.data import DataLoader
@@ -61,9 +62,15 @@ def build_optimizer(
         ):
             raise ValueError("encoder_learning_rate must be finite and positive.")
 
+        encoder_parameters = [
+            parameter for parameter in model.encoder.parameters()
+            if parameter.requires_grad
+        ]
+        if not encoder_parameters:
+            raise ValueError("Fine-tuning requires trainable encoder parameters.")
         parameter_groups.append(
             {
-                "params": model.encoder.layer4.parameters(),
+                "params": encoder_parameters,
                 "lr": encoder_learning_rate,
             }
         )
@@ -82,14 +89,30 @@ def train_one_epoch(
     loader: DataLoader,
     optimizer: Optimizer,
     device: torch.device,
+    *,
+    label_smoothing: float = 0.0,
+    mixup_alpha: float = 0.0,
 ) -> EpochMetrics:
     """Train for one pass over the supplied loader.
 
     The caller selects the training stage, places the model on device,
-    and constructs its optimizer. Loss is unweighted mean cross-entropy.
+    and constructs its optimizer. Loss is unweighted mean cross-entropy with
+    optional label smoothing. Mixup blends inputs/targets and reports weighted
+    target agreement as accuracy. Validation never uses either regularizer.
     """
+    if (
+        isinstance(label_smoothing, bool)
+        or not isinstance(label_smoothing, (int, float))
+        or not 0 <= label_smoothing < 1
+    ):
+        raise ValueError("label_smoothing must be a finite probability in [0, 1).")
+    if (
+        isinstance(mixup_alpha, bool) or not isinstance(mixup_alpha, (int, float))
+        or not math.isfinite(mixup_alpha) or mixup_alpha < 0
+    ):
+        raise ValueError("mixup_alpha must be finite and non-negative.")
     model.train()
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
     loss_sum = 0.0
     correct = 0
@@ -101,8 +124,17 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
 
+        weight = 1.0
+        mixed_labels = labels
+        if mixup_alpha > 0:
+            weight = float(np.random.beta(mixup_alpha, mixup_alpha))
+            order = torch.randperm(images.size(0), device=images.device)
+            images = weight * images + (1 - weight) * images[order]
+            mixed_labels = labels[order]
         logits = model(images)
         loss = loss_fn(logits, labels)
+        if mixup_alpha > 0:
+            loss = weight * loss + (1 - weight) * loss_fn(logits, mixed_labels)
 
         if not torch.isfinite(loss).item():
             raise FloatingPointError("Training loss is not finite.")
@@ -112,7 +144,9 @@ def train_one_epoch(
 
         batch_size = labels.size(0)
         loss_sum += loss.item() * batch_size
-        correct += (logits.argmax(dim=1) == labels).sum().item()
+        predictions = logits.argmax(dim=1)
+        correct += weight * (predictions == labels).sum().item()
+        correct += (1 - weight) * (predictions == mixed_labels).sum().item()
         samples += batch_size
 
     if samples == 0:
