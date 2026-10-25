@@ -34,7 +34,7 @@ def _json_value(value):
 
 def _validate(payload):
     """Check the small public format before any restoration or model construction."""
-    from src.training.trainer import TrainConfig
+    from src.training.pretrained_trainer import TrainConfig
     if not isinstance(payload, dict) or _REQUIRED - payload.keys():
         raise ValueError('Checkpoint schema has missing required fields')
     if type(payload['schema_version']) is not int or payload['schema_version'] != 1:
@@ -80,7 +80,7 @@ def _validate(payload):
             raise ValueError('Inconsistent checkpoint stop_reason')
         history = payload['history']
         if (not isinstance(history, list) or len(history) != completed
-                or [row['epoch'] for row in history] != list(range(1, completed + 1))
+                or [row['epoch'] for row in history] != list(range(1, completed + 1))\
                 or history[-1]['phase_index'] != phase_index
                 or history[-1]['epoch_in_phase'] != payload['epoch_in_phase']
                 or sum(row['optimizer_updates'] for row in history) != payload['optimizer_updates']
@@ -160,7 +160,7 @@ def read_checkpoint(path, *, expected_config=None, expected_data_identity=None) 
         raise ValueError('Cannot read safe checkpoint payload') from error
     payload = _validate(payload)
     if expected_config is not None:
-        from src.training.trainer import TrainConfig
+        from src.training.pretrained_trainer import TrainConfig
         expected = expected_config.to_dict() if isinstance(expected_config, TrainConfig) else TrainConfig.from_dict(expected_config).to_dict()
         if payload['training_config'] != expected:
             raise ValueError('Checkpoint training config mismatch')

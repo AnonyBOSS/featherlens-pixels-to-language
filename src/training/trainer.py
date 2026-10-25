@@ -1,4 +1,9 @@
-"""Small classification loops. Accuracies and precision/recall/F1 are fractions."""
+"""Small classification loops. Accuracies and precision/recall/F1 are fractions.
+
+This module provides the multi-phase fine-tuning pipeline for pretrained models,
+and re-exports the scratch baseline classification training loop from
+``scratch_trainer``.
+"""
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 import json
@@ -13,6 +18,17 @@ from torch import nn
 from src.data.transforms import IMAGENET_NORMALIZATION
 from src.models.pretrained import ModelConfig
 from src.training.data import PreprocessingConfig
+from src.training.pretrained_trainer import (
+    Phase,
+    TrainConfig,
+)
+from src.training.scratch_trainer import (
+    EpochReport,
+    TrainingConfig,
+    TrainingResult,
+    evaluate_classification,
+    train_classification,
+)
 
 
 def resolve_precision(amp, device) -> str:
@@ -195,76 +211,6 @@ def evaluate(model, loader, device, *, class_names, precision='fp32') -> dict:
             'per_class': per_class, 'confusion_matrix': confusion.tolist(), 'predictions': predictions}
 
 
-@dataclass(frozen=True)
-class Phase:
-    mode: str = 'frozen'
-    epochs: int = 2
-    lr: float = 0.001
-
-    def __post_init__(self):
-        if self.mode not in ('frozen', 'partial', 'full'):
-            raise ValueError('phase mode must be frozen, partial or full')
-        if type(self.epochs) is not int or self.epochs < 1:
-            raise ValueError('phase epochs must be a positive integer')
-        if type(self.lr) not in (int, float) or not math.isfinite(self.lr) or self.lr <= 0:
-            raise ValueError('phase lr must be finite and positive')
-
-
-@dataclass(frozen=True)
-class TrainConfig:
-    architecture: str = 'convnext_tiny'
-    phases: tuple[Phase, ...] = (Phase(),)
-    batch_size: int = 8
-    accumulation_steps: int = 2
-    weight_decay: float = 0.0001
-    amp: str = 'float16'
-    seed: int = 42
-    num_workers: int = 0
-    freeze_bn_stats: bool = True
-    head_dropout: float = 0.0
-    lr_decay: float = 1.0
-    patience: int | None = None
-    min_delta: float = 0.0
-    image_size: int = 224
-    normalization: tuple | None = IMAGENET_NORMALIZATION
-
-    def __post_init__(self):
-        ModelConfig(self.architecture, head_dropout=self.head_dropout, freeze_bn_stats=self.freeze_bn_stats)
-        if not isinstance(self.phases, (tuple, list)) or not self.phases or any(
-                not isinstance(phase, Phase) for phase in self.phases):
-            raise ValueError('phases must be a nonempty sequence of Phase values')
-        object.__setattr__(self, 'phases', tuple(self.phases))
-        for name, minimum in (('batch_size', 1), ('accumulation_steps', 1), ('num_workers', 0), ('seed', 0)):
-            value = getattr(self, name)
-            if type(value) is not int or value < minimum:
-                raise ValueError(f'{name} must be an integer >= {minimum}')
-        if self.seed >= 2**32:
-            raise ValueError('seed must be below 2**32')
-        if self.amp not in ('off', 'auto', 'float16', 'bfloat16'):
-            raise ValueError('amp must be off, auto, float16 or bfloat16')
-        for name in ('weight_decay', 'min_delta', 'lr_decay'):
-            value = getattr(self, name)
-            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-                raise ValueError(f'{name} must be finite and nonnegative')
-        if self.lr_decay == 0:
-            raise ValueError('lr_decay must be positive')
-        if self.patience is not None and (type(self.patience) is not int or self.patience < 1):
-            raise ValueError('patience must be a positive integer or None')
-        preprocessing = PreprocessingConfig(self.image_size, self.normalization)
-        object.__setattr__(self, 'normalization', preprocessing.normalization)
-
-    def to_dict(self):
-        """JSON-normalized settings, including lists for immutable tuple fields."""
-        return json.loads(json.dumps(asdict(self), allow_nan=False))
-
-    @classmethod
-    def from_dict(cls, values):
-        values = dict(values)
-        if 'phases' in values:
-            values['phases'] = tuple(Phase(**phase) for phase in values['phases'])
-        return cls(**values)
-
-
 def fit(model, loaders, config, run_dir, *, data_identity, weight_provenance,
         device='cpu', resume=False, on_epoch=None) -> dict:
     """Fit completed epochs; latest.pt is the recovery authority.
@@ -412,3 +358,18 @@ def fit(model, loaders, config, run_dir, *, data_identity, weight_provenance,
                 return result()
         start_epoch = 0
     return result()
+
+
+__all__ = [
+    "Phase",
+    "TrainConfig",
+    "resolve_precision",
+    "train_epoch",
+    "evaluate",
+    "fit",
+    "EpochReport",
+    "TrainingConfig",
+    "TrainingResult",
+    "evaluate_classification",
+    "train_classification",
+]
