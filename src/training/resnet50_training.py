@@ -61,3 +61,42 @@ def train_one_epoch(
         accuracy=correct / samples,
         samples=samples,
     )
+
+
+@torch.no_grad()
+def validate_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+) -> EpochMetrics:
+    """Measure validation performance without updating the model."""
+    model.eval()
+    loss_fn = nn.CrossEntropyLoss()
+
+    loss_sum = 0.0
+    correct = 0
+    samples = 0
+
+    for batch in loader:
+        images = batch["image"].to(device)
+        labels = batch["label"].to(device)
+
+        logits = model(images)
+        loss = loss_fn(logits, labels)
+
+        if not torch.isfinite(loss).item():
+            raise FloatingPointError("Validation loss is not finite.")
+
+        batch_size = labels.size(0)
+        loss_sum += loss.item() * batch_size
+        correct += (logits.argmax(dim=1) == labels).sum().item()
+        samples += batch_size
+
+    if samples == 0:
+        raise ValueError("The validation loader produced no samples.")
+
+    return EpochMetrics(
+        loss=loss_sum / samples,
+        accuracy=correct / samples,
+        samples=samples,
+    )
