@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, a complete read-only integrity audit, the classification data pipeline, and full statistical EDA are implemented. The pretrained CNN foundation adds ConvNeXt-Tiny, EfficientNet-B3, and RegNetY-3.2GF adapters, 200-class heads, reusable encoder features, fine-tuning policies, and prepared train/validation loaders. Stage 1B-1 adds official-weight verification code and a portable cloud GPU preflight notebook. Actual official pretrained-weight loading and GPU execution remain PENDING manual cloud evidence; training workflows, prediction CLI, and evaluation are not implemented yet.
+> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, a complete read-only integrity audit, the classification data pipeline, and full statistical EDA are implemented. The pretrained CNN foundation adds ConvNeXt-Tiny, EfficientNet-B3, and RegNetY-3.2GF adapters, 200-class heads, reusable encoder features, fine-tuning policies, and prepared train/validation loaders. Stage 1B-1 adds official-weight verification and a portable cloud GPU preflight notebook. Returned Colab evidence verifies all three official checkpoints and FP32 smoke checks; complete GPU acceptance remains PENDING the AMP correction rerun and storage verification. Training workflows, prediction CLI, and evaluation are not implemented yet.
 
 ## Overview
 
@@ -149,10 +149,13 @@ throughput. It performs no optimizer updates. Existing CUDA Torch/Torchvision ar
 inspected and preserved; canonical preparation metadata and pinned HF train images
 are supplied separately. The small metadata handoff ZIP contains no images.
 
-Code and CPU-safe checks are available. Actual official-weight/GPU verification,
-resource measurements, and fresh-session persistence are **PENDING** until a real
-cloud run returns `preflight-report.json` and `preflight-evidence.zip`. CPU-only
-execution exports `pending_gpu`; it does not fetch weights or certify GPU behavior.
+Returned Colab T4 evidence verifies all three official checkpoints and all 18 FP32
+checks. ConvNeXt's six BF16 checks failed after the original automatic selector
+mistook emulation support for native BF16 support. Automatic selection now requires
+native BF16 capability and selects FP16 on this T4. A supported-precision rerun,
+storage verification and complete acceptance remain **PENDING**; see the guide for
+the exact evidence and limits. CPU-only execution exports `pending_gpu`; it does
+not fetch weights or certify GPU behavior.
 
 ## Project structure
 

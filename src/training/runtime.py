@@ -110,6 +110,7 @@ def collect_runtime(repo_dir=None):
                                         'compute_capability': [properties.major, properties.minor]})
             cuda['selected_device_index'] = torch.cuda.current_device()
             cuda['bfloat16_supported'] = bool(torch.cuda.is_bf16_supported())
+            cuda['bfloat16_native_supported'] = bool(torch.cuda.is_bf16_supported(including_emulation=False))
         except Exception as error:
             cuda['inspection_failure'] = _failure('runtime', error)
     git = {'status': 'unavailable'}
@@ -320,12 +321,15 @@ def _run_candidate(config, architecture, batches):
         stage = 'device_transfer'
         model.to(device)
         precisions = ['fp32']
+        # Tensor creation/emulation support does not establish native BF16
+        # convolution kernels (for example, on a compute-capability 7.5 T4).
+        native_bfloat16 = bool(torch.cuda.is_bf16_supported(including_emulation=False))
         if config.amp == 'off':
             result['checks'].append({'precision': 'amp', 'status': 'not_run', 'reason': 'explicitly disabled'})
-        elif config.amp == 'bfloat16' and not torch.cuda.is_bf16_supported():
-            result['checks'].append({'precision': 'bfloat16', 'status': 'unsupported', 'reason': 'CUDA device does not support bfloat16'})
+        elif config.amp == 'bfloat16' and not native_bfloat16:
+            result['checks'].append({'precision': 'bfloat16', 'status': 'unsupported', 'reason': 'CUDA device lacks native bfloat16 support; emulation is insufficient'})
         else:
-            precisions.append(('bfloat16' if torch.cuda.is_bf16_supported() else 'float16') if config.amp == 'auto' else config.amp)
+            precisions.append(('bfloat16' if native_bfloat16 else 'float16') if config.amp == 'auto' else config.amp)
         stage = 'smoke_checks'
         for policy in ('frozen', 'partial', 'full'):
             for precision in precisions:

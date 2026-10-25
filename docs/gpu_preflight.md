@@ -7,21 +7,60 @@ weights, features, finite loss/backward gradients, fine-tuning policies, support
 AMP, memory and resident-batch inference throughput. It performs no optimizer
 updates, tuning, model selection, or substantive training.
 
-| Evidence | State before a manual cloud run |
+| Evidence | Verified state after the first Colab run |
 | --- | --- |
 | Shared verification code, thin notebook and setup instructions | COMPLETED |
 | Focused CPU-safe import, config, cache, comparison and report tests | TESTED locally; see PR verification report for counts |
-| ConvNeXt-Tiny `ConvNeXt_Tiny_Weights.IMAGENET1K_V1` actual checkpoint/GPU | PENDING |
-| EfficientNet-B3 `EfficientNet_B3_Weights.IMAGENET1K_V1` actual checkpoint/GPU | PENDING |
-| RegNetY-3.2GF `RegNet_Y_3_2GF_Weights.IMAGENET1K_V2` actual checkpoint/GPU | PENDING |
-| Actual GPU/AMP execution, measured memory and throughput | PENDING; no local measurements |
+| All three exact official checkpoints and retained backbone states | VERIFIED in returned Colab evidence |
+| All three models, frozen/partial/full, FP32 training backward and validation inference | VERIFIED: 18/18 checks passed |
+| EfficientNet-B3 and RegNetY-3.2GF BF16 execution | 12/12 checks passed; this T4 has no native BF16 support |
+| ConvNeXt-Tiny BF16 execution on this T4 | FAILED: 6/6 checks; incorrect automatic precision selection |
+| Native FP16 rerun and complete GPU acceptance | PENDING |
+| GPU memory and short resident-batch FP32 inference measurements | Recorded in returned evidence; not training benchmarks |
 | Fresh-session persistence and Kaggle offline packaging | PENDING |
 
 Configured weight names, synthetic checkpoints, mocked CUDA calls and CPU smoke
 tests do not establish genuine pretrained/GPU execution. The local environment is
-CPU-only with no official cached weights. A CPU preflight exports `pending_gpu`,
+CPU-only with no official cached weights; cloud claims above come from the user's
+returned evidence, not local tests. A CPU preflight exports `pending_gpu`,
 without fetching source images or weights. Missing checks and failures remain
 explicit in evidence; a successful notebook cell alone is insufficient.
+
+## First Colab findings and AMP correction
+
+The returned run used clean commit
+`d2b221630becc0b9d11363f031248dec633c175e`, a Tesla T4 (compute capability 7.5),
+Python 3.13.16, Torch 2.11.0+cu130, Torchvision 0.26.0+cu130 and cuDNN 92700.
+Canonical preparation matched, representative train/validation pixels loaded,
+and official test pixels were not accessed. All three official artifact hashes
+and retained backbone comparisons passed. Overall, 30 of 36 checks passed; all
+six failures were ConvNeXt BF16 checks, across both partitions and all policies.
+Storage was not requested, so acceptance correctly remained incomplete.
+
+The original automatic selection called `torch.cuda.is_bf16_supported()` with its
+default `including_emulation=True`. The T4 can represent BF16 tensors, but that
+does not establish native BF16 convolution support. Automatic selection now asks
+for `including_emulation=False`: it chooses FP16 on this T4 and BF16 when native
+support exists. Explicit BF16 on an emulation-only device is reported unsupported;
+failed checks are never silently retried in a different precision. Runtime facts
+retain the broad `bfloat16_supported` flag and add `bfloat16_native_supported`.
+See [PyTorch's capability implementation](https://github.com/pytorch/pytorch/blob/v2.11.0/torch/cuda/__init__.py).
+
+Preserve the first failed report. Its JSON SHA-256 is
+`893c653c2bb6148b0f3aff2591eeccd560b1ae0498bcd7d440aa9c570ba6e046`;
+the evidence ZIP SHA-256 is
+`ea491df7b74a4b45828069d0841c8561bab9a9caf9884b4357812c4af55f0b4d`.
+The ZIP inventory and standalone report were independently checked. Generated
+evidence stays outside Git. The measured inference times cover only ten images
+after warm-up; they cannot establish architecture rankings or training budgets.
+
+For a quick rerun in the existing clean checkout, the original runner already
+accepts explicit `amp="float16"`. Use all three architectures, new output and
+mounted-Drive directories, and return the new evidence. That report will correctly
+identify the original commit and explicit FP16 configuration. Verification of
+the updated automatic selection on a GPU remains a separate pending claim until
+the fixed published commit is executed. No Torch/CUDA reinstall is required to
+change the configured precision, and source data and weight caches can be reused.
 
 ## First run: online Colab GPU
 

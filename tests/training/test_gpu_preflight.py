@@ -287,7 +287,7 @@ def test_mocked_candidate_records_check_failure_and_continues(tmp_path, monkeypa
     model.to = lambda device: model
     monkeypatch.setattr(runtime, 'build_verified_pretrained_model', lambda *a, **kw: (model, {'status': 'synthetic_fixture_only'}))
     monkeypatch.setattr(torch.cuda, 'current_device', lambda: 0)
-    monkeypatch.setattr(torch.cuda, 'is_bf16_supported', lambda: False)
+    monkeypatch.setattr(torch.cuda, 'is_bf16_supported', lambda including_emulation=True: False)
     monkeypatch.setattr(torch.cuda, 'empty_cache', lambda: None)
     monkeypatch.setattr(runtime, '_memory', lambda device: {'status': 'mocked_not_evidence'})
     monkeypatch.setattr(runtime, '_throughput', lambda *a: {'status': 'mocked_not_evidence'})
@@ -347,7 +347,7 @@ def test_explicit_unsupported_amp_cannot_be_acceptance(tmp_path, monkeypatch):
     model.to = lambda device: model
     monkeypatch.setattr(runtime, 'build_verified_pretrained_model', lambda *a, **kw: (model, {'status': 'synthetic_fixture_only'}))
     monkeypatch.setattr(torch.cuda, 'current_device', lambda: 0)
-    monkeypatch.setattr(torch.cuda, 'is_bf16_supported', lambda: False)
+    monkeypatch.setattr(torch.cuda, 'is_bf16_supported', lambda including_emulation=True: False)
     monkeypatch.setattr(torch.cuda, 'empty_cache', lambda: None)
     monkeypatch.setattr(runtime, '_check_batch', lambda m, b, **kw: {'status': 'passed', 'precision': kw['precision']})
     monkeypatch.setattr(runtime, '_check_validation', lambda m, b, **kw: {'status': 'passed', 'precision': kw['precision']})
@@ -413,3 +413,56 @@ def test_validation_primitive_is_eval_inference_only_without_updates(monkeypatch
     assert result['optimizer_updates'] == 0
     assert all(parameter.grad is None for parameter in model.parameters())
     assert all(torch.equal(before[name], parameter) for name, parameter in model.named_parameters())
+
+
+@pytest.fixture
+def mocked_cuda_candidate(monkeypatch):
+    """Keep candidate precision routing real; device work is not GPU evidence."""
+    runtime = api()
+    model = TinyAdapter()
+    monkeypatch.setattr(model, 'to', lambda device: model)
+    monkeypatch.setattr(runtime, 'build_verified_pretrained_model', lambda *a, **kw: (model, {'status': 'synthetic_fixture_only'}))
+    monkeypatch.setattr(torch.cuda, 'current_device', lambda: 0)
+    monkeypatch.setattr(torch.cuda, 'empty_cache', lambda: None)
+    def check(model, batch, **kwargs):
+        return {'status': 'passed', 'policy': kwargs['policy'], 'precision': kwargs['precision']}
+    monkeypatch.setattr(runtime, '_check_batch', check)
+    monkeypatch.setattr(runtime, '_check_validation', check)
+    monkeypatch.setattr(runtime, '_throughput', lambda *a: {'status': 'mocked_not_evidence'})
+    return runtime
+
+
+@pytest.mark.parametrize('native_supported, expected_precision', [(False, 'float16'), (True, 'bfloat16')])
+def test_auto_amp_uses_native_bfloat16_capability(mocked_cuda_candidate, tmp_path, monkeypatch, native_supported, expected_precision):
+    # Tensor creation/emulation is available in both cases. Only native BF16
+    # kernels justify choosing BF16 for the GPU model's auto precision.
+    monkeypatch.setattr(torch.cuda, 'is_bf16_supported', lambda including_emulation=True: including_emulation or native_supported)
+    config = mocked_cuda_candidate.PreflightConfig(tmp_path / 'prepared', tmp_path / 'output')
+    result = mocked_cuda_candidate._run_candidate(config, 'convnext_tiny', {'train': {}, 'val': {}})
+    assert result['status'] == 'passed'
+    assert len(result['checks']) == 12
+    assert {check['precision'] for check in result['checks']} == {'fp32', expected_precision}
+    assert sum(check['precision'] == expected_precision for check in result['checks']) == 6
+
+
+def test_explicit_bfloat16_emulation_is_unsupported(mocked_cuda_candidate, tmp_path, monkeypatch):
+    monkeypatch.setattr(torch.cuda, 'is_bf16_supported', lambda including_emulation=True: including_emulation)
+    config = mocked_cuda_candidate.PreflightConfig(tmp_path / 'prepared', tmp_path / 'output', amp='bfloat16')
+    result = mocked_cuda_candidate._run_candidate(config, 'convnext_tiny', {'train': {}, 'val': {}})
+    assert result['status'] == 'incomplete'
+    assert result['checks'][0]['status'] == 'unsupported'
+    assert result['checks'][0]['precision'] == 'bfloat16'
+    assert all(check['precision'] == 'fp32' for check in result['checks'][1:])
+
+
+@pytest.mark.parametrize('native_supported', [False, True])
+def test_runtime_distinguishes_bfloat16_capabilities(monkeypatch, native_supported):
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'device_count', lambda: 1)
+    monkeypatch.setattr(torch.cuda, 'current_device', lambda: 0)
+    monkeypatch.setattr(torch.cuda, 'get_device_properties', lambda index: SimpleNamespace(
+        name='synthetic CUDA fixture', total_memory=16 * 1024**3, major=8 if native_supported else 7, minor=0 if native_supported else 5))
+    monkeypatch.setattr(torch.cuda, 'is_bf16_supported', lambda including_emulation=True: including_emulation or native_supported)
+    cuda = api().collect_runtime()['cuda']
+    assert cuda['bfloat16_supported'] is True
+    assert cuda['bfloat16_native_supported'] is native_supported
