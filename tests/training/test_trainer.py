@@ -1,11 +1,19 @@
 """CPU arithmetic for training and evaluation; no downloaded weights or GPU claims."""
+from dataclasses import replace
 import importlib
 import json
 import math
+import random
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
+from torch.utils.data import Dataset
+
+from src.data.classification import make_classification_loaders
+from src.models.finetuning import apply_parameter_policy, apply_training_policy
+from src.models.pretrained import ModelConfig
 
 
 @pytest.fixture
@@ -247,3 +255,248 @@ def test_evaluate_rejects_nonfinite_confidence_after_float_conversion(api):
     values['image'] = torch.tensor([[1e40, 0]], dtype=torch.float64)
     with pytest.raises(FloatingPointError, match='[Nn]on-finite'):
         api.evaluate(nn.Identity(), [values], 'cpu', class_names=['A', 'B'])
+
+# Fit tests use synthetic 200-logit adapters, never official pretrained evidence.
+
+
+CLASS_NAMES = [f'Bird {i}' for i in range(200)]
+DATA_IDENTITY = {'manifest_sha256': 'a' * 64, 'class_names': CLASS_NAMES}
+PROVENANCE = {'status': 'synthetic_fixture', 'architecture': 'convnext_tiny'}
+
+
+class TinyAdapter(nn.Module):
+    def __init__(self, dropout=0.25):
+        super().__init__()
+        self.config = ModelConfig('convnext_tiny', head_dropout=dropout)
+        self.encoder = nn.Sequential(nn.Linear(3, 4), nn.Tanh(), nn.Linear(4, 4))
+        self.encoder_norm = nn.Identity()
+        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(4, 200))
+        self.set_fine_tuning('frozen')
+
+    def set_fine_tuning(self, mode, *, freeze_bn_stats=True):
+        self.config = replace(self.config, fine_tuning=mode, freeze_bn_stats=freeze_bn_stats)
+        apply_parameter_policy(self.encoder, self.encoder_norm, self.head, (self.encoder[2],), mode)
+        self.train(self.training)
+
+    def train(self, mode=True):
+        super().train(mode)
+        apply_training_policy(self.encoder, self.encoder_norm, (self.encoder[2],),
+                              self.config.fine_tuning, training=mode,
+                              freeze_bn_stats=self.config.freeze_bn_stats)
+        return self
+
+    def forward(self, images):
+        return self.head(self.encoder(images))
+
+
+class RandomSamples(Dataset):
+    def __init__(self, training):
+        self.training = training
+
+    def __len__(self):
+        return 7 if self.training else 4
+
+    def __getitem__(self, index):
+        noise = random.random() + float(np.random.random()) + torch.rand(()).item() if self.training else 0
+        return {'image': torch.tensor([index / 10, noise, 1.0]),
+                'label': index % 3, 'image_id': f'image-{index}'}
+
+
+def tiny_loaders():
+    return make_classification_loaders({'train': RandomSamples(True), 'val': RandomSamples(False)},
+                                       batch_size=3, seed=42)
+
+
+def tiny_config(api, **kwargs):
+    return api.TrainConfig(amp='off', batch_size=3, head_dropout=0.25, **kwargs)
+
+
+def run_tiny(api, directory, config, **kwargs):
+    return api.fit(TinyAdapter(), tiny_loaders(), config, directory,
+                   data_identity=DATA_IDENTITY, weight_provenance=PROVENANCE, **kwargs)
+
+
+def test_config_accepts_json_and_is_immutable(api):
+    from dataclasses import FrozenInstanceError
+    assert hasattr(api, 'TrainConfig'), 'TrainConfig is missing'
+    config = api.TrainConfig.from_dict({'phases': [{'mode': 'partial', 'epochs': 3, 'lr': 0.02}],
+                                      'normalization': [[0.1, 0.2, 0.3], [1, 1, 1]]})
+    assert config.phases == (api.Phase('partial', 3, 0.02),)
+    assert config == api.TrainConfig.from_dict(json.loads(json.dumps(config.to_dict())))
+    assert isinstance(config.normalization[0], tuple)
+    with pytest.raises(FrozenInstanceError):
+        config.seed = 0
+
+
+@pytest.mark.parametrize('kwargs', [
+    {'phases': []}, {'phases': [{'mode': 'oops'}]}, {'phases': [{'epochs': 0}]},
+    {'phases': [{'lr': float('nan')}]}, {'architecture': 'resnet50'}, {'batch_size': True},
+    {'accumulation_steps': 0}, {'num_workers': -1}, {'seed': 2**32}, {'seed': True},
+    {'amp': 'fp8'}, {'weight_decay': -1}, {'lr_decay': 0}, {'lr_decay': float('inf')},
+    {'patience': 0}, {'patience': True}, {'min_delta': -1}, {'head_dropout': 1},
+    {'freeze_bn_stats': 1}, {'image_size': 0}, {'normalization': [[0] * 3, [0] * 3]},
+])
+def test_config_rejects_invalid_values(api, kwargs):
+    assert hasattr(api, 'TrainConfig'), 'TrainConfig is missing'
+    with pytest.raises((ValueError, TypeError)):
+        api.TrainConfig.from_dict(kwargs)
+
+
+@pytest.mark.parametrize('interrupt_after', [1, 2, 3])
+def test_fit_resume_matches_uninterrupted_rng_and_phase_state(api, tmp_path, interrupt_after):
+    assert hasattr(api, 'fit'), 'fit is missing'
+    from src.training.checkpoint import read_checkpoint
+    config = tiny_config(api, phases=(api.Phase('frozen', 2, 0.01), api.Phase('partial', 2, 0.003)),
+                         lr_decay=0.5)
+    def callback(record, validation):
+        random.random()
+        np.random.random()
+        torch.rand(3)
+        if record['epoch'] == interrupt_after + 1:
+            raise RuntimeError('interrupted')
+    torch.manual_seed(19)
+    run_tiny(api, tmp_path / 'full', config,
+             on_epoch=lambda record, validation: (random.random(), np.random.random(), torch.rand(3)))
+    torch.manual_seed(19)
+    with pytest.raises(RuntimeError, match='interrupted'):
+        run_tiny(api, tmp_path / 'split', config, on_epoch=callback)
+    # New random construction and external RNG activity must not affect continuation.
+    random.seed(999)
+    np.random.seed(999)
+    torch.manual_seed(999)
+    result = run_tiny(api, tmp_path / 'split', config, resume=True,
+                      on_epoch=lambda record, validation: (random.random(), np.random.random(), torch.rand(3)))
+    full = read_checkpoint(tmp_path / 'full' / 'latest.pt')
+    split = read_checkpoint(tmp_path / 'split' / 'latest.pt')
+    assert result['history'] == full['history']
+    assert [row['learning_rate'] for row in result['history']] == [0.01, 0.005, 0.003, 0.0015]
+    assert result['optimizer_updates'] == 8
+    for name, tensor in full['model_state'].items():
+        assert torch.equal(tensor, split['model_state'][name]), name
+    assert split['scheduler_state'] == full['scheduler_state']
+    for state in split['optimizer_state']['state'].values():
+        assert state['step'].item() == 4  # two epochs in new phase, no carried Adam moments
+    assert torch.equal(split['rng_state']['torch_cpu'], full['rng_state']['torch_cpu'])
+    assert split['rng_state']['python'] == full['rng_state']['python']
+    assert result['validation'] == full['validation']
+
+
+def test_fit_phase_masks_and_fresh_adam_state(api, tmp_path):
+    assert hasattr(api, 'fit'), 'fit is missing'
+    model = TinyAdapter()
+    config = tiny_config(api, phases=tuple(api.Phase(mode, 1, 0.01) for mode in ('frozen', 'partial', 'full')))
+    snapshots = []
+    def capture(record, validation):
+        snapshots.append({name: parameter.detach().clone() for name, parameter in model.named_parameters()})
+    before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+    api.fit(model, tiny_loaders(), config, tmp_path, data_identity=DATA_IDENTITY,
+            weight_provenance=PROVENANCE, on_epoch=capture)
+    for name in before:
+        changed = [not torch.equal(a[name], b[name]) for a, b in zip([before] + snapshots, snapshots)]
+        expected = [True, True, True] if name.startswith('head') else (
+            [False, True, True] if name.startswith('encoder.2') else [False, False, True])
+        assert changed == expected, name
+    from src.training.checkpoint import read_checkpoint
+    payload = read_checkpoint(tmp_path / 'latest.pt')
+    assert all(value['step'].item() == 2 for value in payload['optimizer_state']['state'].values())
+    assert payload['model_config']['fine_tuning'] == 'full'
+
+
+def test_best_strict_ties_and_independent_early_stop_monitor(api, tmp_path, monkeypatch):
+    assert hasattr(api, 'fit'), 'fit is missing'
+    evaluate = api.evaluate
+    losses = iter([5.0, 5.0, 4.95, 4.94, 3.0])
+    def prescribed_loss(*args, **kwargs):
+        result = evaluate(*args, **kwargs)
+        result['loss'] = next(losses)
+        return result
+    monkeypatch.setattr(api, 'evaluate', prescribed_loss)
+    config = tiny_config(api, phases=(api.Phase('frozen', 5),), patience=3, min_delta=0.1)
+    result = run_tiny(api, tmp_path, config)
+    assert result['epochs_completed'] == 4
+    assert result['stop_reason'] == 'early_stopping'
+    assert [row['is_best'] for row in result['history']] == [True, False, True, True]
+    assert result['best_epoch'] == 4
+    from src.training.checkpoint import read_checkpoint
+    best = read_checkpoint(tmp_path / 'best.pt')
+    assert best['best_loss'] == 4.94
+    assert best['early_stop_best'] == 5.0
+    assert best['bad_epochs'] == 3
+    assert best['stop_reason'] == 'early_stopping'
+    # The exhausted loss iterator catches any unintended resumed validation.
+    assert run_tiny(api, tmp_path, config, resume=True) == result
+
+
+def test_completed_run_is_idempotent_and_fresh_run_cannot_overwrite(api, tmp_path):
+    assert hasattr(api, 'fit'), 'fit is missing'
+    config = tiny_config(api, phases=(api.Phase(epochs=1),))
+    result = run_tiny(api, tmp_path, config)
+    assert result['stop_reason'] == 'completed'
+    before = (tmp_path / 'latest.pt').read_bytes()
+    assert run_tiny(api, tmp_path, config, resume=True) == result
+    assert before == (tmp_path / 'latest.pt').read_bytes()
+    with pytest.raises(FileExistsError):
+        run_tiny(api, tmp_path, config)
+
+
+def test_fit_rejects_resume_configuration_and_data_mismatch(api, tmp_path):
+    assert hasattr(api, 'fit'), 'fit is missing'
+    config = tiny_config(api, phases=(api.Phase(epochs=1),))
+    run_tiny(api, tmp_path, config)
+    with pytest.raises(ValueError, match='config'):
+        run_tiny(api, tmp_path, replace(config, lr_decay=0.9), resume=True)
+    with pytest.raises(ValueError, match='data'):
+        api.fit(TinyAdapter(), tiny_loaders(), config, tmp_path, resume=True,
+                data_identity={**DATA_IDENTITY, 'manifest_sha256': 'b' * 64}, weight_provenance=PROVENANCE)
+
+
+def test_fit_rejects_zero_successful_updates_without_checkpoint(api, tmp_path, monkeypatch):
+    assert hasattr(api, 'fit'), 'fit is missing'
+    train = api.train_epoch
+    def no_updates(*args, **kwargs):
+        return {**train(*args, **kwargs), 'optimizer_updates': 0}
+    monkeypatch.setattr(api, 'train_epoch', no_updates)
+    with pytest.raises(RuntimeError, match='optimizer updates'):
+        run_tiny(api, tmp_path, tiny_config(api))
+    assert not (tmp_path / 'latest.pt').exists()
+
+
+def test_explicit_same_mode_phase_starts_fresh_optimizer_and_schedule(api, tmp_path):
+    from src.training.checkpoint import read_checkpoint
+    config = tiny_config(api, phases=(api.Phase('frozen', 2, 0.01), api.Phase('frozen', 1, 0.01)),
+                         lr_decay=0.5)
+    result = run_tiny(api, tmp_path, config)
+    assert [row['learning_rate'] for row in result['history']] == [0.01, 0.005, 0.01]
+    assert all(state['step'].item() == 2 for state in read_checkpoint(tmp_path / 'latest.pt')['optimizer_state']['state'].values())
+
+
+def test_fit_rejects_changed_resolved_precision_before_any_updates(api, tmp_path, monkeypatch):
+    config = tiny_config(api, phases=(api.Phase(epochs=1),))
+    run_tiny(api, tmp_path, config)
+    monkeypatch.setattr(api, 'resolve_precision', lambda amp, device: 'float16')
+    with pytest.raises(ValueError, match='precision'):
+        run_tiny(api, tmp_path, config, resume=True)
+
+
+@pytest.mark.parametrize('mismatch', ['workers', 'batch_size', 'persistent_workers', 'class_mapping'])
+def test_fit_rejects_incompatible_loader_before_updates(api, tmp_path, mismatch):
+    from types import SimpleNamespace
+    loaders = tiny_loaders()
+    if mismatch == 'class_mapping':
+        loaders['train'].dataset.source = SimpleNamespace(class_names=list(reversed(CLASS_NAMES)))
+    else:
+        attribute = 'num_workers' if mismatch == 'workers' else mismatch
+        object.__setattr__(loaders['train'], attribute, {'workers': 1, 'batch_size': 4, 'persistent_workers': True}[mismatch])
+    with pytest.raises(ValueError, match='Loader|class mapping'):
+        api.fit(TinyAdapter(), loaders, tiny_config(api), tmp_path,
+                data_identity=DATA_IDENTITY, weight_provenance=PROVENANCE)
+    assert not (tmp_path / 'latest.pt').exists()
+
+
+def test_fit_rejects_missing_manifest_identity_before_updating_weights(api, tmp_path):
+    model = TinyAdapter()
+    before = model.head[1].weight.detach().clone()
+    with pytest.raises(ValueError, match='manifest'):
+        api.fit(model, tiny_loaders(), tiny_config(api), tmp_path,
+                data_identity={'class_names': CLASS_NAMES}, weight_provenance=PROVENANCE)
+    assert torch.equal(before, model.head[1].weight)

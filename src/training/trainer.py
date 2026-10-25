@@ -1,8 +1,18 @@
 """Small classification loops. Accuracies and precision/recall/F1 are fractions."""
 from contextlib import nullcontext
+from dataclasses import asdict, dataclass
+import json
+import math
+from pathlib import Path
+import random
 
+import numpy as np
 import torch
 from torch import nn
+
+from src.data.transforms import IMAGENET_NORMALIZATION
+from src.models.pretrained import ModelConfig
+from src.training.data import PreprocessingConfig
 
 
 def resolve_precision(amp, device) -> str:
@@ -183,3 +193,222 @@ def evaluate(model, loader, device, *, class_names, precision='fp32') -> dict:
             **{f'macro_{metric}': sum(row[metric] for row in per_class) / num_classes
                for metric in ('precision', 'recall', 'f1')},
             'per_class': per_class, 'confusion_matrix': confusion.tolist(), 'predictions': predictions}
+
+
+@dataclass(frozen=True)
+class Phase:
+    mode: str = 'frozen'
+    epochs: int = 2
+    lr: float = 0.001
+
+    def __post_init__(self):
+        if self.mode not in ('frozen', 'partial', 'full'):
+            raise ValueError('phase mode must be frozen, partial or full')
+        if type(self.epochs) is not int or self.epochs < 1:
+            raise ValueError('phase epochs must be a positive integer')
+        if type(self.lr) not in (int, float) or not math.isfinite(self.lr) or self.lr <= 0:
+            raise ValueError('phase lr must be finite and positive')
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    architecture: str = 'convnext_tiny'
+    phases: tuple[Phase, ...] = (Phase(),)
+    batch_size: int = 8
+    accumulation_steps: int = 2
+    weight_decay: float = 0.0001
+    amp: str = 'float16'
+    seed: int = 42
+    num_workers: int = 0
+    freeze_bn_stats: bool = True
+    head_dropout: float = 0.0
+    lr_decay: float = 1.0
+    patience: int | None = None
+    min_delta: float = 0.0
+    image_size: int = 224
+    normalization: tuple | None = IMAGENET_NORMALIZATION
+
+    def __post_init__(self):
+        ModelConfig(self.architecture, head_dropout=self.head_dropout, freeze_bn_stats=self.freeze_bn_stats)
+        if not isinstance(self.phases, (tuple, list)) or not self.phases or any(
+                not isinstance(phase, Phase) for phase in self.phases):
+            raise ValueError('phases must be a nonempty sequence of Phase values')
+        object.__setattr__(self, 'phases', tuple(self.phases))
+        for name, minimum in (('batch_size', 1), ('accumulation_steps', 1), ('num_workers', 0), ('seed', 0)):
+            value = getattr(self, name)
+            if type(value) is not int or value < minimum:
+                raise ValueError(f'{name} must be an integer >= {minimum}')
+        if self.seed >= 2**32:
+            raise ValueError('seed must be below 2**32')
+        if self.amp not in ('off', 'auto', 'float16', 'bfloat16'):
+            raise ValueError('amp must be off, auto, float16 or bfloat16')
+        for name in ('weight_decay', 'min_delta', 'lr_decay'):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError(f'{name} must be finite and nonnegative')
+        if self.lr_decay == 0:
+            raise ValueError('lr_decay must be positive')
+        if self.patience is not None and (type(self.patience) is not int or self.patience < 1):
+            raise ValueError('patience must be a positive integer or None')
+        preprocessing = PreprocessingConfig(self.image_size, self.normalization)
+        object.__setattr__(self, 'normalization', preprocessing.normalization)
+
+    def to_dict(self):
+        """JSON-normalized settings, including lists for immutable tuple fields."""
+        return json.loads(json.dumps(asdict(self), allow_nan=False))
+
+    @classmethod
+    def from_dict(cls, values):
+        values = dict(values)
+        if 'phases' in values:
+            values['phases'] = tuple(Phase(**phase) for phase in values['phases'])
+        return cls(**values)
+
+
+def fit(model, loaders, config, run_dir, *, data_identity, weight_provenance,
+        device='cpu', resume=False, on_epoch=None) -> dict:
+    """Fit completed epochs; latest.pt is the recovery authority.
+
+    Every explicit phase starts fresh AdamW moments and a new StepLR, even when
+    consecutive phases have the same mode. The FP16 scaler spans phases. Seeds
+    cover training randomness; callers seed before constructing a fresh model.
+    Nonpersistent canonical loaders are required for exact epoch continuation.
+    """
+    from src.training.checkpoint import (
+        capture_rng_state, restore_rng_state, save_checkpoint, read_checkpoint, _load_model_state,
+    )
+    if not isinstance(config, TrainConfig):
+        raise TypeError('config must be a TrainConfig')
+    device = torch.device(device)
+    precision = resolve_precision(config.amp, device)
+    if set(loaders) != {'train', 'val'}:
+        raise ValueError('fit requires only train and val loaders')
+    manifest = data_identity.get('manifest_sha256')
+    if not isinstance(manifest, str) or len(manifest) != 64 or any(c not in '0123456789abcdef' for c in manifest):
+        raise ValueError('data_identity requires a manifest_sha256 digest')
+    class_names = data_identity.get('class_names')
+    if (not isinstance(class_names, (list, tuple)) or len(class_names) != 200
+            or any(not isinstance(name, str) or not name for name in class_names)
+            or len(set(class_names)) != 200):
+        raise ValueError('data_identity requires the ordered 200-class mapping in class_names')
+    for name, loader in loaders.items():
+        if (loader.num_workers != config.num_workers or loader.persistent_workers
+                or loader.batch_size != config.batch_size or loader.drop_last
+                or not isinstance(loader.generator, torch.Generator)):
+            raise ValueError('Loader workers, batch size and generators must match config; use nonpersistent loaders')
+        source = getattr(loader.dataset, 'source', None)
+        if source is not None and list(source.class_names) != list(class_names):
+            raise ValueError(f'{name} loader class mapping differs from data_identity')
+    if (model.config.architecture != config.architecture or model.config.head_dropout != config.head_dropout
+            or model.config.freeze_bn_stats != config.freeze_bn_stats):
+        raise ValueError('model config does not match training config')
+    run_dir = Path(run_dir)
+    latest_path, best_path = run_dir / 'latest.pt', run_dir / 'best.pt'
+    saved = None
+    if resume:
+        saved = read_checkpoint(latest_path, expected_config=config.to_dict(), expected_data_identity=data_identity)
+        if saved['resolved_precision'] != precision:
+            raise ValueError('Resolved precision differs from checkpoint')
+        if saved['weight_provenance'] != weight_provenance:
+            raise ValueError('Weight provenance differs from checkpoint')
+        _load_model_state(model, saved['model_state'])
+        model.set_fine_tuning(saved['model_config']['fine_tuning'], freeze_bn_stats=config.freeze_bn_stats)
+    elif latest_path.exists() or best_path.exists():
+        raise FileExistsError('Run checkpoints already exist; use resume=True or a fresh run directory')
+    run_dir.mkdir(parents=True, exist_ok=True)
+    model.to(device)
+    history = [] if saved is None else saved['history']
+    epochs_completed = 0 if saved is None else saved['epochs_completed']
+    total_updates = 0 if saved is None else saved['optimizer_updates']
+    best_loss = float('inf') if saved is None else saved['best_loss']
+    best_epoch = None if saved is None else saved['best_epoch']
+    early_stop_best = float('inf') if saved is None else saved['early_stop_best']
+    bad_epochs = 0 if saved is None else saved['bad_epochs']
+    stop_reason = None if saved is None else saved['stop_reason']
+    validation = None if saved is None else saved['validation']
+
+    def result():
+        return {'epochs_completed': epochs_completed, 'best_epoch': best_epoch, 'best_loss': best_loss,
+                'optimizer_updates': total_updates, 'history': history, 'stop_reason': stop_reason,
+                'resolved_precision': precision, 'latest_checkpoint': str(latest_path),
+                'best_checkpoint': str(best_path), 'validation': validation}
+
+    if stop_reason is not None:
+        model.eval()
+        return result()
+    scaler = torch.amp.GradScaler('cuda', init_scale=128.0) if precision == 'float16' else None
+    if saved is not None and scaler is not None:
+        scaler.load_state_dict(saved['scaler_state'])
+    start_phase = 0 if saved is None else saved['phase_index']
+    start_epoch = 0 if saved is None else saved['epoch_in_phase']
+    if start_epoch == config.phases[start_phase].epochs:
+        start_phase += 1
+        start_epoch = 0
+    # Restore once, after random construction and optimizer/scaler restoration.
+    restore_pending = True
+    for phase_index in range(start_phase, len(config.phases)):
+        phase = config.phases[phase_index]
+        model.set_fine_tuning(phase.mode, freeze_bn_stats=config.freeze_bn_stats)
+        optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                                      lr=phase.lr, weight_decay=config.weight_decay)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=config.lr_decay)
+        if saved is not None and phase_index == saved['phase_index']:
+            optimizer.load_state_dict(saved['optimizer_state'])
+            scheduler.load_state_dict(saved['scheduler_state'])
+        if restore_pending:
+            if saved is None:
+                random.seed(config.seed)
+                np.random.seed(config.seed)
+                torch.manual_seed(config.seed)
+            else:
+                restore_rng_state(saved['rng_state'], loaders)
+            restore_pending = False
+        for epoch_in_phase in range(start_epoch + 1, phase.epochs + 1):
+            learning_rate = optimizer.param_groups[0]['lr']
+            training = train_epoch(model, loaders['train'], optimizer, device,
+                                   accumulation_steps=config.accumulation_steps, precision=precision, scaler=scaler)
+            if training['optimizer_updates'] == 0:
+                raise RuntimeError('Epoch completed with zero successful optimizer updates')
+            validation = evaluate(model, loaders['val'], device, class_names=class_names, precision=precision)
+            epochs_completed += 1
+            total_updates += training['optimizer_updates']
+            is_best = validation['loss'] < best_loss
+            if is_best:
+                best_loss, best_epoch = validation['loss'], epochs_completed
+            if validation['loss'] < early_stop_best - config.min_delta:
+                early_stop_best, bad_epochs = validation['loss'], 0
+            else:
+                bad_epochs += 1
+            if config.patience is not None and bad_epochs >= config.patience:
+                stop_reason = 'early_stopping'
+            elif epochs_completed == sum(p.epochs for p in config.phases):
+                stop_reason = 'completed'
+            record = {'epoch': epochs_completed, 'phase_index': phase_index, 'phase_mode': phase.mode,
+                      'epoch_in_phase': epoch_in_phase, 'learning_rate': learning_rate,
+                      'train_loss': training['loss'], 'train_top1_accuracy': training['top1_accuracy'],
+                      **{f'val_{key}': validation[key] for key in (
+                          'loss', 'top1_accuracy', 'top5_accuracy', 'macro_precision', 'macro_recall', 'macro_f1')},
+                      'optimizer_updates': training['optimizer_updates'], 'skipped_updates': training['skipped_updates'],
+                      'total_optimizer_updates': total_updates, 'num_train_samples': training['num_samples'],
+                      'num_val_samples': validation['num_samples'], 'is_best': is_best}
+            history.append(record)
+            scheduler.step()
+            if on_epoch is not None:
+                on_epoch(record, validation)
+            payload = {'schema_version': 1, 'model_state': model.state_dict(), 'model_config': asdict(model.config),
+                       'training_config': config.to_dict(), 'weight_provenance': weight_provenance,
+                       'data_identity': data_identity, 'class_names': list(class_names),
+                       'optimizer_state': optimizer.state_dict(), 'scheduler_state': scheduler.state_dict(),
+                       'scaler_state': None if scaler is None else scaler.state_dict(),
+                       'epochs_completed': epochs_completed, 'phase_index': phase_index, 'epoch_in_phase': epoch_in_phase,
+                       'resolved_precision': precision, 'optimizer_updates': total_updates, 'history': history,
+                       'best_loss': best_loss, 'best_epoch': best_epoch, 'early_stop_best': early_stop_best,
+                       'bad_epochs': bad_epochs, 'stop_reason': stop_reason, 'validation': validation,
+                       'rng_state': capture_rng_state(loaders)}
+            if is_best:
+                save_checkpoint(best_path, payload)
+            save_checkpoint(latest_path, payload)
+            if stop_reason is not None:
+                return result()
+        start_epoch = 0
+    return result()
