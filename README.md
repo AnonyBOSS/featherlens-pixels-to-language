@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** Revision-pinned CUB source loading, schema validation, caption parsing, a complete read-only integrity audit, the classification data pipeline, and full statistical EDA are implemented. The pretrained CNN foundation adds ConvNeXt-Tiny, EfficientNet-B3, and RegNetY-3.2GF adapters, 200-class heads, reusable encoder features, fine-tuning policies, and prepared train/validation loaders. Stage 1B-1 adds official-weight verification and a portable cloud GPU preflight notebook. Returned Colab evidence verifies all three official checkpoints and FP32 smoke checks; complete GPU acceptance remains PENDING the AMP correction rerun and storage verification. Training workflows, prediction CLI, and evaluation are not implemented yet.
+> **Development status:** The source/data foundation, integrity audit, classification pipeline and statistical EDA are implemented. Three pretrained CNN adapters and official-weight GPU preflight are available; returned T4 evidence verifies all three models in FP32/FP16 (36/36 checks) and corrected automatic precision selection (12/12 targeted checks). Classification training now includes completed-epoch recovery, validation metrics, local MLflow tracking and a thin cloud acceptance notebook. **Genuine canonical training metrics and checkpoints remain PENDING the user-run cloud experiment.** Prediction and downstream-task CLIs remain planned.
 
 ## Overview
 
@@ -149,13 +149,24 @@ throughput. It performs no optimizer updates. Existing CUDA Torch/Torchvision ar
 inspected and preserved; canonical preparation metadata and pinned HF train images
 are supplied separately. The small metadata handoff ZIP contains no images.
 
-Returned Colab T4 evidence verifies all three official checkpoints and all 18 FP32
-checks. ConvNeXt's six BF16 checks failed after the original automatic selector
-mistook emulation support for native BF16 support. Automatic selection now requires
-native BF16 capability and selects FP16 on this T4. A supported-precision rerun,
-storage verification and complete acceptance remain **PENDING**; see the guide for
-the exact evidence and limits. CPU-only execution exports `pending_gpu`; it does
-not fetch weights or certify GPU behavior.
+Returned T4 evidence verifies all three official checkpoints and 36/36 FP32/FP16
+checks. A later targeted automatic-precision run passed 12/12 checks and storage
+readback, selecting FP16 because this T4 lacks native BF16 support. PR 13 merged as
+`6ad1adfe47f339414693c2034658a32bc6df2ca6`; the guide preserves the earlier failed
+BF16 evidence and measurement limits. These preflight runs made zero optimizer updates.
+
+### First classification training acceptance
+
+Use [02_train_convnext.ipynb](notebooks/pretrained/02_train_convnext.ipynb) on online
+Colab GPU, with the full published training PR SHA and verified metadata ZIP.
+It preserves installed CUDA packages, mounts Drive and calls the shared trainer
+with [pretrained_acceptance.json](configs/pretrained_acceptance.json): ConvNeXt-Tiny,
+frozen two epochs, physical batch 8, accumulation 2, AdamW LR 0.001, FP16 and seed 42.
+The stable Drive run directory supports explicit resume; keep the entire directory.
+Return `run_summary.json` and `evidence.zip` for review. See the
+[training/recovery guide](docs/pretrained_cnn_foundation.md#classification-training-and-recovery).
+Local synthetic CPU tests establish orchestration/recovery only; real CUB training
+accuracy, updates, duration and cloud restoration remain **PENDING**.
 
 ## Project structure
 
@@ -176,15 +187,17 @@ pixels-to-language/
 ├── tests/                # Automated tests
 ├── requirements-eda.txt  # Pinned statistical EDA dependencies
 ├── requirements-classification.txt  # Verified classification data dependencies
-├── requirements.txt      # Anticipated model-training dependencies
+├── requirements.txt      # Pinned CPU development/training dependencies
 └── README.md
 ```
 
-Model adapters, classification data integration, statistical analysis, and EDA visualization modules are available. Training workflows, evaluation, and runnable training commands remain planned.
+Model adapters, classification data integration, EDA, classification training,
+validation metrics, checkpoint recovery and a runnable training CLI are available.
 
 ## Getting started
 
-**Prerequisites:** Python 3.12 and Git for the verified data/EDA environment. A GPU is recommended for training once the pipeline is implemented.
+**Prerequisites:** Python 3.12 and Git for the verified CPU development environment.
+Use a cloud GPU for the first canonical training acceptance.
 
 From the repository root, create a virtual environment:
 
@@ -211,22 +224,20 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements-eda.txt
 ```
 
-> For classification data, pretrained CNN adapters, and the complete repository test suite, follow [the pinned CPU setup](docs/pretrained_cnn_foundation.md#cpu-development-setup). EDA-only tests run with `python -m pytest -q tests/analysis`; complete tests also require the classification dependencies. The broader `requirements.txt` remains an anticipated model-training dependency list. Training and prediction commands are not implemented.
+> For classification training and the complete test suite, follow [the pinned CPU setup](docs/pretrained_cnn_foundation.md#cpu-development-setup). `requirements.txt` includes the classification pins and `mlflow-skinny==3.17.2`. EDA-only tests run with `python -m pytest -q tests/analysis`. Cloud notebooks preserve their installed CUDA stack and install only missing non-Torch dependencies.
 
-### Planned CLI
+### Classification training CLI
 
-The completed project will expose a consistent command-line interface for training and inference across all three tasks. For example, the intended usage will resemble:
+From a compatible CUDA environment with canonical preparation available:
 
 ```bash
-# Planned commands — not yet implemented
-python -m src.cli train --task classification --config configs/classification.yaml
-python -m src.cli train --task colorization --config configs/colorization.yaml
-python -m src.cli train --task caption --config configs/caption.yaml
-
-python -m src.cli predict --task caption --image path/to/image.jpg
+python -m src.cli train --task classification --config configs/pretrained_acceptance.json --prepared-dir outputs/classification-v1 --run-dir outputs/experiments/convnext-frozen-acceptance-v1 --device cuda
+# Reuse that directory only with explicit recovery:
+python -m src.cli train --task classification --config configs/pretrained_acceptance.json --prepared-dir outputs/classification-v1 --run-dir outputs/experiments/convnext-frozen-acceptance-v1 --device cuda --resume
 ```
 
-The actual commands and configuration files will be documented once the corresponding features exist.
+Local MLflow tracking is the default; `--tracking json` explicitly selects portable
+reports only. Prediction, colorization and caption training commands remain planned.
 
 ## Development roadmap
 
@@ -246,7 +257,8 @@ The actual commands and configuration files will be documented once the correspo
 | Colorization | PSNR, MAE, qualitative comparisons against ground truth |
 | Captioning | BLEU, ROUGE-L, generated captions compared with references |
 
-Experiments will be tracked with **MLflow** or an equivalent tool. Reported results will be based on actual experiments and compared with relevant published or open-source baselines where a fair comparison is possible.
+Classification experiments use local **MLflow** plus independent JSON/CSV reports.
+Reported results must come from actual experiments; baseline comparisons remain planned.
 
 ## Development guidelines
 
