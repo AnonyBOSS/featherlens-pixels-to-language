@@ -188,12 +188,14 @@ def test_cuda_auto_requires_native_bfloat16(api, monkeypatch, native):
             api.resolve_precision('bfloat16', 'cuda:0')
 
 
-def test_evaluate_top1_uses_argmax_when_logits_tie(api):
-    result = api.evaluate(nn.Identity(), [batch([[0, 0, 0, 0, 0, 0]], [0], ['tie'])],
-                          'cpu', class_names=list('ABCDEF'))
+@pytest.mark.parametrize('num_classes', [6, 1000])
+def test_evaluate_ties_use_lowest_class_id_for_top1_and_ranking(api, num_classes):
+    result = api.evaluate(nn.Identity(), [batch([[0] * num_classes], [0], ['tie'])],
+                          'cpu', class_names=[f'C{i}' for i in range(num_classes)])
     assert result['top1_accuracy'] == 1
     assert result['predictions']['tie']['predicted_label'] == 0
-    assert result['predictions']['tie']['confidence'] == pytest.approx(1 / 6)
+    assert result['predictions']['tie']['top5'] == [0, 1, 2, 3, 4]
+    assert result['predictions']['tie']['confidence'] == pytest.approx(1 / num_classes)
 
 
 @pytest.mark.parametrize('precision', ['float16', 'bfloat16'])
@@ -204,3 +206,44 @@ def test_loops_reject_half_precision_on_cpu_before_forward(api, precision):
         api.train_epoch(model, [batch([[1]], [0])], optimizer, 'cpu', precision=precision)
     with pytest.raises(ValueError, match='precision|AMP'):
         api.evaluate(model, [batch([[1]], [0])], 'cpu', class_names=['A', 'B'], precision=precision)
+
+
+@pytest.mark.parametrize('bad_value', [float('nan'), float('inf')])
+@pytest.mark.parametrize('scaling', ['none', 'disabled', 'enabled'])
+def test_train_rejects_nonfinite_loss_before_backward(api, bad_value, scaling):
+    model = nn.Linear(1, 2, bias=False)
+    nn.init.ones_(model.weight)
+    before = model.weight.detach().clone()
+    scaler = None if scaling == 'none' else torch.amp.GradScaler('cpu', enabled=scaling == 'enabled')
+    with pytest.raises(FloatingPointError, match='[Nn]on-finite.*loss'):
+        api.train_epoch(model, [batch([[bad_value]], [0])],
+                        torch.optim.SGD(model.parameters(), lr=0.1), 'cpu', scaler=scaler)
+    torch.testing.assert_close(model.weight, before)
+    assert model.weight.grad is None
+
+
+@pytest.mark.parametrize('bad_value', [float('nan'), float('inf')])
+@pytest.mark.parametrize('disabled_scaler', [False, True])
+def test_train_rejects_nonfinite_unprotected_gradients(api, bad_value, disabled_scaler):
+    model = nn.Linear(1, 2, bias=False)
+    nn.init.zeros_(model.weight)
+    model.weight.register_hook(lambda gradient: torch.full_like(gradient, bad_value))
+    scaler = torch.amp.GradScaler('cpu', enabled=False) if disabled_scaler else None
+    with pytest.raises(FloatingPointError, match='[Nn]on-finite.*gradient'):
+        api.train_epoch(model, [batch([[1]], [0])],
+                        torch.optim.SGD(model.parameters(), lr=0.1), 'cpu', scaler=scaler)
+    torch.testing.assert_close(model.weight, torch.zeros_like(model.weight))
+
+
+@pytest.mark.parametrize('logits', [[float('nan'), 0], [float('inf'), 0],
+                                   [0, float('-inf')], [-3e38, 3e38]])
+def test_evaluate_rejects_nonfinite_outputs_or_loss(api, logits):
+    with pytest.raises(FloatingPointError, match='[Nn]on-finite'):
+        api.evaluate(nn.Identity(), [batch([logits], [0])], 'cpu', class_names=['A', 'B'])
+
+
+def test_evaluate_rejects_nonfinite_confidence_after_float_conversion(api):
+    values = batch([[0, 0]], [0])
+    values['image'] = torch.tensor([[1e40, 0]], dtype=torch.float64)
+    with pytest.raises(FloatingPointError, match='[Nn]on-finite'):
+        api.evaluate(nn.Identity(), [values], 'cpu', class_names=['A', 'B'])

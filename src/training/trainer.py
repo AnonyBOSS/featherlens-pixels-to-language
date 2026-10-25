@@ -42,10 +42,13 @@ def _step(optimizer, scaler, num_samples):
     """Normalize summed, unscaled gradients by this window's actual samples."""
     if scaler is not None:
         scaler.unscale_(optimizer)
+    protected = scaler is not None and scaler.is_enabled()
     for group in optimizer.param_groups:
         for parameter in group['params']:
             if parameter.grad is not None:
                 parameter.grad.div_(num_samples)
+                if not protected and not torch.isfinite(parameter.grad).all():
+                    raise FloatingPointError('Non-finite gradients before optimizer update')
     if scaler is None:
         optimizer.step()
         successful = True
@@ -82,6 +85,8 @@ def train_epoch(model, loader, optimizer, device, *, accumulation_steps=1,
         with _autocast(precision, device):
             logits = model(images)
             loss = nn.functional.cross_entropy(logits, labels, reduction='sum')
+        if not torch.isfinite(loss):
+            raise FloatingPointError('Non-finite training loss')
         if scaler is None:
             loss.backward()
         else:
@@ -134,10 +139,17 @@ def evaluate(model, loader, device, *, class_names, precision='fp32') -> dict:
             logits = model(images)
             if logits.ndim != 2 or logits.shape != (len(labels), num_classes):
                 raise ValueError('Logits must match batch size and class_names')
+            if not torch.isfinite(logits).all():
+                raise FloatingPointError('Non-finite evaluation logits')
             loss = nn.functional.cross_entropy(logits, labels, reduction='sum')
+        if not torch.isfinite(loss):
+            raise FloatingPointError('Non-finite evaluation loss')
         probabilities = logits.float().softmax(dim=1)
-        top5 = logits.topk(min(5, num_classes), dim=1).indices
-        predicted = top5[:, 0]
+        if not torch.isfinite(probabilities).all():
+            raise FloatingPointError('Non-finite evaluation probabilities')
+        # Stable ordering breaks ties by lower class ID, consistent with argmax.
+        top5 = logits.argsort(dim=1, descending=True, stable=True)[:, :min(5, num_classes)]
+        predicted = logits.argmax(dim=1)
         top5_correct += (top5 == labels[:, None]).any(dim=1).sum().item()
         loss_sum += loss.item()
         num_samples += len(labels)
