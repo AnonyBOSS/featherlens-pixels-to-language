@@ -399,3 +399,142 @@ def test_tracking_failure_marks_mlflow_failed_and_retry_reconciles_same_run(setu
     assert result['tracking']['status'] == 'finished'
     assert [m.step for m in client.get_metric_history(run_id, 'val_loss')] == [1, 2]
     assert any(failure['stage'] == 'tracking' for failure in result['failures'])
+
+
+@pytest.mark.parametrize('terminal', [False, True])
+def test_evidence_failure_records_failed_run_and_terminal_retry_repairs_without_training(setup, monkeypatch, terminal):
+    pytest.importorskip('mlflow')
+    from mlflow.tracking import MlflowClient
+    api, config, _, directory = setup
+    if terminal:
+        api.run_training('prepared', directory, config, device='cpu', tracking='mlflow')
+    original = api._evidence
+    failure = OSError('synthetic evidence export failure')
+    def unavailable(path):
+        raise failure
+    monkeypatch.setattr(api, '_evidence', unavailable)
+    with pytest.raises(OSError) as caught:
+        api.run_training('prepared', directory, config, device='cpu', tracking='mlflow', resume=terminal)
+    assert caught.value is failure
+    state = json.loads((directory / 'run_state.json').read_text())
+    summary = json.loads((directory / 'run_summary.json').read_text())
+    assert state['status'] == summary['status'] == 'failed'
+    assert state['failures'][-1]['stage'] == 'finalization'
+    assert summary['failures'][-1]['message'] == 'synthetic evidence export failure'
+    run_id = state['tracking']['run_id']
+    client = MlflowClient(tracking_uri=(directory / 'mlruns').as_uri())
+    assert client.get_run(run_id).info.status == 'FAILED'
+    assert state['tracking']['status'] == 'failed'
+    before = {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in ('best.pt', 'latest.pt')}
+    assert read_checkpoint(directory / 'latest.pt')['stop_reason'] == 'completed'
+    monkeypatch.setattr(api, '_evidence', original)
+    for name in ('fit', 'make_pretrained_loaders', 'build_verified_pretrained_model', 'validate_preflight_preparation'):
+        monkeypatch.setattr(api, name, forbidden)
+    repaired = api.run_training('missing', directory, config, device='cpu', tracking='mlflow', resume=True)
+    assert repaired['status'] == 'completed'
+    assert repaired['epochs_completed'] == 2
+    assert repaired['optimizer_updates'] == 10
+    assert repaired['tracking']['run_id'] == run_id
+    assert client.get_run(run_id).info.status == 'FINISHED'
+    assert any(item['stage'] == 'finalization' for item in repaired['failures'])
+    assert before == {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in before}
+    with ZipFile(directory / 'evidence.zip') as archive:
+        assert json.loads(archive.read('run_summary.json'))['status'] == 'completed'
+
+
+def test_best_effort_failure_recording_does_not_mask_original_finalization_error(setup, monkeypatch):
+    run(setup)
+    api, _, _, _ = setup
+    failure = OSError('original export failure')
+    def unavailable(*args, **kwargs):
+        raise failure
+    def cannot_record(*args, **kwargs):
+        raise PermissionError('secondary failure recording error')
+    monkeypatch.setattr(api, '_evidence', unavailable)
+    original_write = api._write_json
+    recording_attempted = []
+    def write_then_fail_recovery(path, value):
+        if isinstance(value, dict) and value.get('status') == 'failed':
+            recording_attempted.append(path.name)
+            cannot_record()
+        return original_write(path, value)
+    monkeypatch.setattr(api, '_write_json', write_then_fail_recovery)
+    with pytest.raises(OSError) as caught:
+        run(setup, resume=True)
+    assert caught.value is failure
+    assert set(recording_attempted) == {'run_state.json', 'run_summary.json'}
+
+
+@pytest.mark.parametrize('damage', ['corrupt', 'history', 'tensor', 'provenance'])
+def test_nonterminal_resume_rejects_invalid_best_before_pixels_or_updates(setup, monkeypatch, damage):
+    import src.training.trainer as trainer
+    from src.training.checkpoint import save_checkpoint
+    original_train = trainer.train_epoch
+    calls = 0
+    def interrupt(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError('stop after first checkpoint')
+        return original_train(*args, **kwargs)
+    monkeypatch.setattr(trainer, 'train_epoch', interrupt)
+    with pytest.raises(RuntimeError, match='stop after first checkpoint'):
+        run(setup)
+    api, _, _, directory = setup
+    if damage == 'corrupt':
+        (directory / 'best.pt').write_bytes(b'corrupt')
+    else:
+        best = read_checkpoint(directory / 'best.pt')
+        if damage == 'history':
+            best['history'][0]['train_loss'] += 1
+        elif damage == 'tensor':
+            best['model_state']['head.1.weight'] = torch.zeros(1)
+        else:
+            best['weight_provenance'] = {'status': 'conflicting initial weights'}
+        save_checkpoint(directory / 'best.pt', best)
+    before = {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in ('best.pt', 'latest.pt')}
+    monkeypatch.setattr(api, 'make_pretrained_loaders', forbidden)
+    monkeypatch.setattr(api, 'fit', forbidden)
+    monkeypatch.setattr(trainer, 'train_epoch', forbidden)
+    with pytest.raises(ValueError):
+        run(setup, resume=True)
+    assert before == {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in before}
+    assert read_checkpoint(directory / 'latest.pt')['epochs_completed'] == 1
+
+
+@pytest.mark.parametrize('contents', [b'{malformed', b'\xff', b'[]', b'{"checkpoints":[]}'])
+def test_terminal_resume_ignores_unreadable_optional_summary_and_records_no_forward(setup, monkeypatch, contents):
+    initial = run(setup)
+    api, _, _, directory = setup
+    (directory / 'run_summary.json').write_bytes(contents)
+    for name in ('fit', 'make_pretrained_loaders', 'build_verified_pretrained_model', 'validate_preflight_preparation'):
+        monkeypatch.setattr(api, name, forbidden)
+    result = run(setup, resume=True)
+    assert result['history'] == initial['history']
+    assert result['checkpoint_reload']['status'] == 'state_loaded_without_forward'
+    assert json.loads((directory / 'run_summary.json').read_text())['status'] == 'completed'
+
+
+def test_secondary_report_failure_preserves_original_training_error_and_checkpoint(setup, monkeypatch):
+    import src.training.trainer as trainer
+    api, _, _, directory = setup
+    original_train = trainer.train_epoch
+    original_write = api._write_json
+    failure = RuntimeError('original training failure')
+    calls = 0
+    def interrupted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise failure
+        return original_train(*args, **kwargs)
+    def unavailable_failure_report(path, value):
+        if isinstance(value, dict) and value.get('status') == 'failed':
+            raise PermissionError('secondary report failure')
+        return original_write(path, value)
+    monkeypatch.setattr(trainer, 'train_epoch', interrupted)
+    monkeypatch.setattr(api, '_write_json', unavailable_failure_report)
+    with pytest.raises(RuntimeError) as caught:
+        run(setup)
+    assert caught.value is failure
+    assert read_checkpoint(directory / 'latest.pt')['epochs_completed'] == 1

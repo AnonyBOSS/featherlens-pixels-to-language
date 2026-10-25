@@ -136,14 +136,22 @@ def _check_counts(record):
         raise ValueError('Each completed epoch must cover 4794 train and 1200 validation samples')
 
 
-def _export_checkpoints(directory, config, identity):
-    latest = read_checkpoint(directory / 'latest.pt', expected_config=config, expected_data_identity=identity)
-    best = read_checkpoint(directory / 'best.pt', expected_config=config, expected_data_identity=identity)
+def _validated_best(directory, config, latest):
+    best = read_checkpoint(directory / 'best.pt', expected_config=config,
+                           expected_data_identity=latest['data_identity'])
     if (best['epochs_completed'] != latest['best_epoch']
-            or best['history'] != latest['history'][:best['epochs_completed']]):
+            or best['history'] != latest['history'][:best['epochs_completed']]
+            or best['weight_provenance'] != latest['weight_provenance']
+            or best['resolved_precision'] != latest['resolved_precision']):
         raise ValueError('Best checkpoint does not agree with authoritative latest checkpoint')
     for record in latest['history']:
         _check_counts(record)
+    return best
+
+
+def _export_checkpoints(directory, config, identity):
+    latest = read_checkpoint(directory / 'latest.pt', expected_config=config, expected_data_identity=identity)
+    best = _validated_best(directory, config, latest)
     _write_json(directory / 'history.json', latest['history'])
     _write_csv(directory / 'history.csv', latest['history'], list(latest['history'][0]))
     for suffix, payload in (('best', best), ('latest', latest)):
@@ -174,41 +182,70 @@ def _evidence(directory):
 
 
 def _finish(directory, config, state, client, *, reload_proof=None):
-    """Rebuild reports only from integrity-checked completed checkpoints."""
-    latest = best = None
-    references = {}
-    if (directory / 'latest.pt').exists():
-        latest, best, references = _export_checkpoints(directory, config, state['data_identity'])
-    history = [] if latest is None else latest['history']
-    _sync_tracking(client, directory, state, config, history)
-    state['epochs_completed'] = len(history)
-    _write_json(directory / 'run_state.json', state)
-    summary = {'status': state['status'], 'stop_reason': None if latest is None else latest['stop_reason'],
-               'epochs_completed': len(history), 'optimizer_updates': 0 if latest is None else latest['optimizer_updates'],
-               'skipped_updates': sum(row['skipped_updates'] for row in history), 'history': history,
-               'best_epoch': None if latest is None else latest['best_epoch'],
-               'best_metrics': None if best is None else {key: value for key, value in best['validation'].items()
-                                                         if type(value) in (int, float)},
-               'latest_metrics': None if latest is None else {key: value for key, value in latest['validation'].items()
+    """Rebuild reports; finalization errors fail visibly without losing checkpoints."""
+    try:
+        _write_json(directory / 'config.json', config.to_dict())
+        _write_json(directory / 'data_identity.json', state['data_identity'])
+        latest = best = None
+        references = {}
+        if (directory / 'latest.pt').exists():
+            latest, best, references = _export_checkpoints(directory, config, state['data_identity'])
+        history = [] if latest is None else latest['history']
+        _sync_tracking(client, directory, state, config, history)
+        state['epochs_completed'] = len(history)
+        _write_json(directory / 'run_state.json', state)
+        summary = {'status': state['status'], 'stop_reason': None if latest is None else latest['stop_reason'],
+                   'epochs_completed': len(history), 'optimizer_updates': 0 if latest is None else latest['optimizer_updates'],
+                   'skipped_updates': sum(row['skipped_updates'] for row in history), 'history': history,
+                   'best_epoch': None if latest is None else latest['best_epoch'],
+                   'best_metrics': None if best is None else {key: value for key, value in best['validation'].items()
                                                              if type(value) in (int, float)},
-               'runtime': state['runtime'], 'device': state['device'],
-               'resolved_precision': state['resolved_precision'], 'started_at': state['started_at'],
-               'elapsed_seconds': state['elapsed_seconds'], 'data_identity': state['data_identity'],
-               'weight_provenance': state.get('weight_provenance'), 'checkpoints': references,
-               'checkpoint_reload': reload_proof or {'status': 'not_executed'},
-               'tracking': state['tracking'], 'failures': state['failures'],
-               'limitations': ['One writer per run directory; recovery is at completed epochs.',
-                               'No official test images accessed. Genuine GPU acceptance requires the user-run notebook.']}
-    _write_json(directory / 'run_summary.json', summary)
-    if client is not None and state['tracking']['status'] != 'error':
+                   'latest_metrics': None if latest is None else {key: value for key, value in latest['validation'].items()
+                                                                 if type(value) in (int, float)},
+                   'runtime': state['runtime'], 'device': state['device'],
+                   'resolved_precision': state['resolved_precision'], 'started_at': state['started_at'],
+                   'elapsed_seconds': state['elapsed_seconds'], 'data_identity': state['data_identity'],
+                   'weight_provenance': state.get('weight_provenance'), 'checkpoints': references,
+                   'checkpoint_reload': reload_proof or {'status': 'not_executed'},
+                   'tracking': state['tracking'], 'failures': state['failures'],
+                   'limitations': ['One writer per run directory; recovery is at completed epochs.',
+                                   'No official test images accessed. Genuine GPU acceptance requires the user-run notebook.']}
+        _write_json(directory / 'run_summary.json', summary)
+        if client is not None and state['tracking']['status'] != 'error':
+            try:
+                client.log_artifact(state['tracking']['run_id'], str(directory / 'run_summary.json'))
+            except Exception as error:
+                _tracking_error(directory, state, error, client)
+                _write_json(directory / 'run_state.json', state)
+                _write_json(directory / 'run_summary.json', summary)
+        _evidence(directory)
+        return summary
+
+    except (Exception, KeyboardInterrupt) as error:
+        # Do not call this finalizer again: report IO itself may be unavailable.
+        state['status'] = 'interrupted' if isinstance(error, KeyboardInterrupt) else 'failed'
+        state['failures'].append(_failure('finalization', error))
+        if client is not None:
+            state['tracking']['status'] = 'failed'
+            try:
+                client.set_terminated(state['tracking']['run_id'], status='FAILED')
+            except Exception as tracking_error:
+                state['failures'].append(_failure('tracking', tracking_error))
+                state['tracking']['status'] = 'error'
         try:
-            client.log_artifact(state['tracking']['run_id'], str(directory / 'run_summary.json'))
-        except Exception as error:
-            _tracking_error(directory, state, error, client)
-            _write_json(directory / 'run_state.json', state)
-            _write_json(directory / 'run_summary.json', summary)
-    _evidence(directory)
-    return summary
+            summary = json.loads((directory / 'run_summary.json').read_text(encoding='utf-8'))
+            if not isinstance(summary, dict):
+                summary = {}
+        except (OSError, UnicodeError, ValueError):
+            summary = {}
+        summary.update(status=state['status'], epochs_completed=state.get('epochs_completed', 0),
+                       failures=state['failures'], tracking=state['tracking'])
+        for filename, report in (('run_state.json', state), ('run_summary.json', summary)):
+            try:
+                _write_json(directory / filename, report)
+            except Exception:
+                pass  # Preserve the original error even if failure recording fails.
+        raise
 
 
 def run_training(prepared_dir, run_dir, config, *, device='cuda', resume=False,
@@ -242,18 +279,24 @@ def run_training(prepared_dir, run_dir, config, *, device='cuda', resume=False,
         if tracking != state['tracking']['mode']:
             raise ValueError('Resume tracking mode must match saved run')
         state['weight_provenance'] = saved['weight_provenance']
+        _validated_best(directory, config, saved)
+        # Validate both retained checkpoints before opening source pixels.
+        best_model, _ = load_model_checkpoint(directory / 'best.pt', device='cpu',
+                                              expected_data_identity=state['data_identity'])
+        del best_model
         if saved['stop_reason'] is not None:
-            # Strict offline state loading also checks model tensor keys/shapes.
-            _, _ = load_model_checkpoint(directory / 'best.pt', device='cpu',
-                                         expected_data_identity=state['data_identity'])
             proof = {'status': 'state_loaded_without_forward', 'reason': 'Terminal recovery did not access source pixels.'}
-            if (directory / 'run_summary.json').is_file():
+            try:
                 old = json.loads((directory / 'run_summary.json').read_text(encoding='utf-8'))
-                if old.get('checkpoints', {}).get('best', {}).get('sha256') == _sha256(directory / 'best.pt'):
-                    proof = old.get('checkpoint_reload', proof)
+                digest = _sha256(directory / 'best.pt')
+                candidate = old.get('checkpoint_reload', {})
+                if (old.get('checkpoints', {}).get('best', {}).get('sha256') == digest
+                        and isinstance(candidate, dict) and candidate.get('status') == 'forward_verified'
+                        and candidate.get('checkpoint_sha256') == digest):
+                    proof = candidate
+            except (OSError, UnicodeError, ValueError, TypeError, AttributeError):
+                pass  # Optional reports never prevent checkpoint-based recovery.
             state['status'] = 'completed'
-            _write_json(directory / 'config.json', config.to_dict())
-            _write_json(directory / 'data_identity.json', state['data_identity'])
             return _finish(directory, config, state, _open_tracking(directory, state), reload_proof=proof)
     precision = resolve_precision(config.amp, device)
     if device.type == 'cuda' and not torch.cuda.is_available():
@@ -321,13 +364,15 @@ def run_training(prepared_dir, run_dir, config, *, device='cuda', resume=False,
         state['status'] = 'interrupted' if isinstance(error, KeyboardInterrupt) else 'failed'
         state['failures'].append(_failure('training', error))
         state['elapsed_seconds'] += time.monotonic() - started
-        _write_json(directory / 'run_state.json', state)
-        _log(directory, f"{state['status']}: {state['failures'][-1]['message']}")
+        try:
+            _write_json(directory / 'run_state.json', state)
+            _log(directory, f"{state['status']}: {state['failures'][-1]['message']}")
+        except Exception:
+            pass
         try:
             _finish(directory, config, state, client)
-        except Exception as recovery_error:
-            state['failures'].append(_failure('report_recovery', recovery_error))
-            _write_json(directory / 'run_state.json', state)
+        except (Exception, KeyboardInterrupt):
+            pass  # The finalizer records its own failure; preserve the training error.
         raise
     state['elapsed_seconds'] += time.monotonic() - started
     _log(directory, 'Training completed; best checkpoint reloaded and forward verified.')
