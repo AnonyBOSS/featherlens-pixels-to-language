@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Mapping
+from hashlib import sha256
+from pathlib import Path
+import re
 from typing import Literal
 
+import torch
 from torch import Tensor, nn
 from torchvision.models import ResNet50_Weights, resnet50
 
 
 TrainingStage = Literal["head", "finetune"]
 FineTuneScope = Literal["layer4", "last_block"]
+INATURALIST_WEIGHTS = "INAT2021_FROM_SCRATCH"
 
 
 class ResNet50Classifier(nn.Module):
@@ -118,3 +124,57 @@ class ResNet50Classifier(nn.Module):
     def forward(self, images: Tensor) -> Tensor:
         """Return raw logits shaped [B, num_classes]."""
         return self.classifier(self.dropout(self.encode(images)))
+
+
+def load_inaturalist_encoder(
+    model: ResNet50Classifier,
+    checkpoint_path: str | Path,
+    expected_sha256: str,
+) -> None:
+    """Load the authors' iNat2021 from-scratch ResNet-50 encoder.
+
+    The caller must construct the model with weights=None. The original
+    10,000-species classifier is discarded; the CUB classifier stays unchanged.
+    A pinned hash identifies the exact local file, not an independently
+    published author checksum. Only tensor-compatible checkpoint data is read.
+    """
+    if not isinstance(expected_sha256, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{64}", expected_sha256,
+    ):
+        raise ValueError("pretrained_sha256 must contain 64 hexadecimal characters.")
+    path = Path(checkpoint_path)
+    with path.open("rb") as stream:
+        digest = sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        if digest.hexdigest() != expected_sha256.lower():
+            raise ValueError("iNaturalist checkpoint SHA-256 does not match the configuration.")
+        stream.seek(0)
+        checkpoint = torch.load(stream, map_location="cpu", weights_only=True)
+
+    if not isinstance(checkpoint, Mapping) or not isinstance(
+        checkpoint.get("state_dict"), Mapping,
+    ):
+        raise ValueError("iNaturalist checkpoint must contain a state_dict mapping.")
+    state = {}
+    for key, value in checkpoint["state_dict"].items():
+        if not isinstance(key, str) or not isinstance(value, Tensor):
+            raise ValueError("iNaturalist state_dict must map names to tensors.")
+        name = key.removeprefix("module.")
+        if name in state:
+            raise ValueError(f"Duplicate iNaturalist parameter: {name}.")
+        state[name] = value
+
+    expected = model.encoder.state_dict()
+    expected_shapes = {name: tensor.shape for name, tensor in expected.items()}
+    expected_shapes.update({
+        "fc.weight": (10000, model.feature_dim), "fc.bias": (10000,),
+    })
+    if state.keys() != expected_shapes.keys():
+        raise ValueError("iNaturalist checkpoint keys do not match a complete ResNet-50.")
+    for name, shape in expected_shapes.items():
+        if state[name].shape != shape:
+            raise ValueError(f"Unexpected iNaturalist parameter shape: {name}.")
+    model.encoder.load_state_dict(
+        {name: state[name] for name in expected}, strict=True,
+    )

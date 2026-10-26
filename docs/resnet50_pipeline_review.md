@@ -230,15 +230,27 @@ parameters during layer4 fine-tuning. Frozen-head training uses 409,800 trainabl
 parameters. The frozen ImageNet diagnostic already showed classifier overfitting,
 so reducing backbone capacity alone is not an established fix.
 
-A future controlled capacity comparison can use EfficientNet-B0 (4,263,748 total
-parameters with a 200-class head), or ResNet-18 (11,279,112). Counts were computed
-from the installed Torchvision implementations after replacing their heads.
-Neither was trained or selected here. Their standard pretrained weights also use
-ImageNet; see the official
-[EfficientNet-B0](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.efficientnet_b0.html)
-and [ResNet-18](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.resnet18.html)
-references. A model-size comparison and a pretraining-overlap audit answer
-different questions.
+The follow-up comparison keeps ResNet-50 and changes its pretraining source to the
+authors' `inat2021_supervised_from_scratch` checkpoint. Their
+[model catalogue](https://github.com/visipedia/newt/blob/main/benchmark/configs.py)
+documents iNaturalist2021 pretraining without ImageNet initialization. This
+changes the learned representation, not the architecture or parameter count.
+It does not establish that iNaturalist and CUB contain no duplicate photographs;
+that requires a separate audit. Validation accuracy and overfitting must still
+be measured, rather than inferred from the pretraining dataset's name.
+The completed follow-up reached 84.08% validation and 84.05% official test
+accuracy, with a 12.68-point clean training/validation gap; see the
+[baseline results and limitations](resnet50_test_results.md#initial-inaturalist2021-cnn-2026-10-26).
+A later validation-only comparison of 12 classifier fits, with fixed encoders,
+selected discriminant shrinkage 0.1 on the fine-tuned encoder. This improved
+validation accuracy to 86.67% and official test accuracy to 85.23%, reducing the
+clean train/validation gap to 10.87 points. The encoder is unchanged; see the
+[classifier comparison](resnet50_test_results.md#inaturalist2021-classifier-improvement-2026-10-26).
+A subsequent gap-focused comparison selected the original frozen iNaturalist
+encoder with discriminant shrinkage 0.9: 91.01% clean training, 85.75%
+validation, and a 5.26-point gap. This balanced option has not been tested on
+the official test set; the earlier model's 85.23% test score remains attached
+to that earlier checkpoint. Both options are preserved.
 
 ## Boundaries for further work
 

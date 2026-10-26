@@ -3,6 +3,7 @@
 import argparse
 import math
 import random
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,9 @@ from src.data.classification import (
 from src.data.preparation import load_classification_manifest
 from src.data.source import load_cub_split
 from src.data.resnet50_transforms import resnet50_transform
-from src.models.resnet50 import ResNet50Classifier
+from src.models.resnet50 import (
+    INATURALIST_WEIGHTS, ResNet50Classifier, load_inaturalist_encoder,
+)
 from src.training.resnet50_experiment import run_experiment
 
 
@@ -64,8 +67,15 @@ def load_config(path: str | Path) -> dict[str, Any]:
             raise ValueError(f"{section}.{field} must be an integer >= {minimum}.")
 
     weights = config["model"].get("weights")
-    if not isinstance(weights, str) or weights not in ResNet50_Weights.__members__:
-        raise ValueError("model.weights must name pretrained ResNet50_Weights.")
+    if weights == INATURALIST_WEIGHTS:
+        path = config["model"].get("pretrained_checkpoint")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("model.pretrained_checkpoint must be a non-empty path string.")
+        digest = config["model"].get("pretrained_sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            raise ValueError("model.pretrained_sha256 must contain 64 hexadecimal characters.")
+    elif not isinstance(weights, str) or weights not in ResNet50_Weights.__members__:
+        raise ValueError("model.weights must name ResNet50_Weights or INAT2021_FROM_SCRATCH.")
     if config["model"].get("finetune_scope", "layer4") not in ("layer4", "last_block"):
         raise ValueError("model.finetune_scope must be 'layer4' or 'last_block'.")
 
@@ -215,13 +225,20 @@ def prepare_training(
         pin_memory=device.type == "cuda",
     )
 
-    weights = ResNet50_Weights[config["model"]["weights"]]
+    use_inaturalist = config["model"]["weights"] == INATURALIST_WEIGHTS
+    weights = None if use_inaturalist else ResNet50_Weights[config["model"]["weights"]]
     model = ResNet50Classifier(
         num_classes=config["model"]["num_classes"],
         weights=weights,
         dropout=config["model"].get("dropout", 0.0),
         finetune_scope=config["model"].get("finetune_scope", "layer4"),
-    ).to(device)
+    )
+    if use_inaturalist:
+        checkpoint_path = Path(config["model"]["pretrained_checkpoint"])
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = Path(__file__).resolve().parents[2] / checkpoint_path
+        load_inaturalist_encoder(model, checkpoint_path, config["model"]["pretrained_sha256"])
+    model = model.to(device)
 
     return model, loaders
 

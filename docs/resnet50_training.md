@@ -83,6 +83,106 @@ Drive link in the project submission. Smoke-test checkpoints are test artifacts.
 Final test-set evaluation, broader metrics, tuning searches, and Grad-CAM remain
 separate steps.
 
+## iNaturalist2021 pretraining without ImageNet initialization
+
+`configs/resnet50_inaturalist.yaml` keeps the same ResNet-50 architecture and
+regularized training recipe, but selects `INAT2021_FROM_SCRATCH`. The authors'
+[catalogue](https://github.com/visipedia/newt/blob/main/benchmark/configs.py)
+identifies `inat2021_supervised_from_scratch` as supervised iNaturalist2021
+pretraining with no earlier ImageNet weights. The similarly named
+`inat2021_supervised` checkpoint does use ImageNet initialization and is not the
+checkpoint selected here. "From scratch" describes the authors' pretraining;
+our CUB model still uses transfer learning.
+
+The authors distribute the checkpoint inside their
+[model archive](https://cornell.app.box.com/s/bnyhq5lwobu6fgjrub44zle0pyjijbmw).
+The required member is
+`cvpr21_newt_pretrained_models/pt/inat2021_supervised_large_from_scratch.pth.tar`.
+Place that file in `outputs/pretrained/`. The configuration pins its SHA-256;
+the loader rejects a different or incomplete file. This is a locally computed
+file identity, not an independently published author checksum. Checkpoint files
+and download provenance stay outside Git under the ignored `outputs/` tree.
+
+The runner constructs the model with `weights=None`, then loads the external
+encoder strictly and discards its 10,000-class classifier. The new CUB head has
+200 outputs. It does not fetch ImageNet weights. The `normalization: imagenet`
+setting refers only to fixed RGB mean/std constants, also used by the authors'
+[preprocessing](https://github.com/visipedia/newt/blob/main/benchmark/pt_resnet_feature_extractor.py);
+normalization does not load or train on ImageNet images. Geometry remains the
+EDA full-image fit/pad transform so bird anatomy is preserved.
+
+```powershell
+.\.venv\Scripts\python.exe -m src.training.resnet50_runner --config configs/resnet50_inaturalist.yaml --check-batch
+.\.venv\Scripts\python.exe -m src.training.resnet50_runner --config configs/resnet50_inaturalist.yaml --train
+```
+
+Runs use the separate `resnet50_inaturalist` experiment and
+`outputs/resnet50_inaturalist/training/<run-id>/` directory. The MLflow database
+is shared with the existing ResNet experiments. Saved CUB checkpoints contain
+the complete encoder and classifier, so evaluation does not require the
+original external pretraining file. Keep the saved configuration and class
+mapping with models uploaded to Google Drive.
+
+Nature pretraining is a reasonable hypothesis for bird recognition, not an
+accuracy guarantee. Compare clean training and validation accuracy, macro F1
+and validation loss on the same fixed split. No image-level CUB/iNaturalist
+overlap audit has been performed. Pretraining provenance alone does not prove
+that the two datasets contain no duplicate photographs.
+
+The first completed run selected fine-tuning epoch 2, reaching **84.08%
+validation** and **84.05% official test accuracy**. Clean training accuracy was
+96.77%, leaving a 12.68-point training/validation gap. See the
+[recorded baseline results and model paths](resnet50_test_results.md#initial-inaturalist2021-cnn-2026-10-26).
+The fixed test result is a report, not a target for additional tuning.
+
+A subsequent 12-trial train/validation-only head comparison selected a
+regularized discriminant classifier on this same fine-tuned encoder. It reached
+**86.67% validation** and **85.23% official test accuracy**. The clean
+train/validation gap fell to 10.87 points. No Python source changes were needed;
+the existing head-refit command reproduces the selected fit:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.training.resnet50_head_refit --source-checkpoint outputs/resnet50_inaturalist/training/9c6e5c07be24414b95fc5717e3d01eeb/best.pt --method discriminant --shrinkage 0.1 --device cuda
+```
+
+The selected inference-only export is
+`outputs/resnet50_inaturalist/head_refit/375ca28ba526439090f6000aedfc6ee1/model.pt`.
+Keep its adjacent `config.json` and `metrics.json` with it for Google Drive
+handoff. The original CNN training checkpoints remain available. See the
+[comparison, verification and limitations](resnet50_test_results.md#inaturalist2021-classifier-improvement-2026-10-26).
+
+For a smaller train/validation gap, the balanced alternative keeps the original
+iNaturalist encoder frozen and uses discriminant shrinkage 0.9:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.training.resnet50_head_refit --source-checkpoint outputs/resnet50_inaturalist/training/9c6e5c07be24414b95fc5717e3d01eeb/head_best.pt --method discriminant --shrinkage 0.9 --device cuda
+```
+
+Its saved export is
+`outputs/resnet50_inaturalist/head_refit/7e70b477f56041ceaac8d3e30961e559/model.pt`.
+It scores 91.01% on clean training images and 85.75% on validation, leaving a
+5.26-point gap. It has not been evaluated on official test images; the previous
+model's 85.23% test accuracy must not be assigned to this model. See the
+[balanced-model tradeoff](resnet50_test_results.md#balanced-inaturalist-option-smaller-validation-gap).
+
+### Search script and generated-file cleanup
+
+The temporary `outputs/resnet50_inaturalist/validation_search/run_search.py`
+collected deterministic encoder features, compared 12 classifier fits, selected
+by validation, and exported the winner. It is unnecessary for normal training,
+head refitting, evaluation, prediction or feature extraction. Its working copy
+was deleted after verifying that a byte-identical copy is retained in the
+MLflow search run's `code` artifacts. Restore that copy to its original working
+location if the complete initial search needs to be replayed.
+
+The selected fits can be reproduced directly with the commands above. Temporary
+test/smoke outputs and regenerable feature caches were removed. Source, tests,
+preparation files, real training checkpoints, final exports, reports and MLflow
+history were preserved. The retained search JSON and MLflow records still show
+what was tried. New calls to the head-refit command collect their own features;
+they do not depend on the removed cache files. Cleanup is recorded in
+`outputs/resnet50_inaturalist/cleanup_report.json`.
+
 ## Regularization trials
 
 The original `configs/resnet50.yaml` retains its baseline behavior. Optional

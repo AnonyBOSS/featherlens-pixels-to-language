@@ -1,0 +1,51 @@
+experiment:
+  name: resnet50_inaturalist
+  seed: 42
+
+model:
+  num_classes: 200
+  weights: INAT2021_FROM_SCRATCH
+  pretrained_checkpoint: outputs/pretrained/inat2021_supervised_large_from_scratch.pth.tar
+  pretrained_sha256: e845bd2512b7728c390523afc8696dafedf2675c93e9d7508a48b416cda8e8d9
+  # Authors' catalogue: iNat2021 pretraining with random initialization.
+  pretraining_dataset: iNaturalist2021
+  pretraining_initialization: random
+  pretraining_source: https://github.com/visipedia/newt/blob/main/benchmark/configs.py
+  dropout: 0.3
+  finetune_scope: layer4
+
+data:
+  prepared_dir: preparation
+  image_size: 224
+  geometry: fit
+  # RGB mean/std constants, also used by the iNaturalist checkpoint authors.
+  # This setting does not load ImageNet model weights.
+  normalization: imagenet
+  augmentation: mild
+  batch_size: 32
+  num_workers: 0
+
+training:
+  device: cuda
+  optimizer: adamw
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  head:
+    epochs: 3
+    learning_rate: 0.001
+  finetune:
+    epochs: 10
+    encoder_learning_rate: 0.00001
+    classifier_learning_rate: 0.0001
+    early_stopping:
+      patience: 3
+      min_delta: 0.001
+
+checkpoints:
+  # Upload the selected completed CUB model and its metadata to Google Drive.
+  local_root: outputs/resnet50_inaturalist
+  selection_metric: val_accuracy
+
+tracking:
+  backend: mlflow
+  local_dir: outputs/resnet50/mlruns
