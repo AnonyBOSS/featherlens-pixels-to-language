@@ -181,7 +181,7 @@ def _evidence(directory):
     os.replace(temporary, directory / 'evidence.zip')
 
 
-def _finish(directory, config, state, client, *, reload_proof=None):
+def _finish(directory, config, state, client, *, reload_proof=None, log_completion=False):
     """Rebuild reports; finalization errors fail visibly without losing checkpoints."""
     try:
         _write_json(directory / 'config.json', config.to_dict())
@@ -218,6 +218,8 @@ def _finish(directory, config, state, client, *, reload_proof=None):
                 _tracking_error(directory, state, error, client)
                 _write_json(directory / 'run_state.json', state)
                 _write_json(directory / 'run_summary.json', summary)
+        if log_completion:
+            _log(directory, 'Training completed; best checkpoint reloaded and forward verified.')
         _evidence(directory)
         return summary
 
@@ -375,5 +377,4 @@ def run_training(prepared_dir, run_dir, config, *, device='cuda', resume=False,
             pass  # The finalizer records its own failure; preserve the training error.
         raise
     state['elapsed_seconds'] += time.monotonic() - started
-    _log(directory, 'Training completed; best checkpoint reloaded and forward verified.')
-    return _finish(directory, config, state, client, reload_proof=proof)
+    return _finish(directory, config, state, client, reload_proof=proof, log_completion=True)

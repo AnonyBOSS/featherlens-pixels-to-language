@@ -538,3 +538,43 @@ def test_secondary_report_failure_preserves_original_training_error_and_checkpoi
         run(setup)
     assert caught.value is failure
     assert read_checkpoint(directory / 'latest.pt')['epochs_completed'] == 1
+
+
+def test_completion_log_append_failure_records_failed_and_terminal_resume_repairs(setup, monkeypatch):
+    pytest.importorskip('mlflow')
+    from mlflow.tracking import MlflowClient
+    api, config, _, directory = setup
+    original_open = Path.open
+    failure = OSError('completion log append unavailable')
+    checkpoints = {}
+    def fail_completion_append(path, mode='r', *args, **kwargs):
+        if path == directory / 'run.log' and mode == 'a' and (directory / 'latest.pt').exists():
+            if read_checkpoint(directory / 'latest.pt')['stop_reason'] == 'completed':
+                checkpoints.update({name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+                                    for name in ('best.pt', 'latest.pt')})
+                raise failure
+        return original_open(path, mode, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', fail_completion_append)
+    with pytest.raises(OSError) as caught:
+        api.run_training('prepared', directory, config, device='cpu', tracking='mlflow')
+    assert caught.value is failure
+    state = json.loads((directory / 'run_state.json').read_text())
+    summary = json.loads((directory / 'run_summary.json').read_text())
+    assert state['status'] == summary['status'] == 'failed'
+    assert state['failures'][-1]['stage'] == 'finalization'
+    assert state['failures'][-1]['message'] == 'completion log append unavailable'
+    run_id = state['tracking']['run_id']
+    client = MlflowClient(tracking_uri=(directory / 'mlruns').as_uri())
+    assert client.get_run(run_id).info.status == 'FAILED'
+    assert checkpoints == {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in checkpoints}
+    monkeypatch.setattr(Path, 'open', original_open)
+    for name in ('fit', 'make_pretrained_loaders', 'build_verified_pretrained_model', 'validate_preflight_preparation'):
+        monkeypatch.setattr(api, name, forbidden)
+    repaired = api.run_training('missing', directory, config, device='cpu', tracking='mlflow', resume=True)
+    assert repaired['status'] == 'completed'
+    assert repaired['epochs_completed'] == 2
+    assert repaired['optimizer_updates'] == 10
+    assert repaired['tracking']['run_id'] == run_id
+    assert client.get_run(run_id).info.status == 'FINISHED'
+    assert checkpoints == {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in checkpoints}
+    assert any(item['stage'] == 'finalization' for item in repaired['failures'])
