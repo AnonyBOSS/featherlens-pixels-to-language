@@ -4,14 +4,14 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** Revision-pinned CUB source loading, the integrity audit, the classification data pipeline, and full statistical EDA are implemented. The ResNet-50 runner supports two-stage training, local MLflow tracking, checkpoint saving, selective fine-tuning and Mixup. Baseline/regularization experiments and logistic/discriminant classifier refits have validation reports and local exports. Two earlier exports have official-test evaluations. Formal grid/random search, a shared inference CLI, scratch-CNN integration, colorization, and captioning remain. See [training commands](docs/resnet50_training.md), [initial regularization results](docs/resnet50_regularization_results.md), [pipeline review and latest validation candidates](docs/resnet50_pipeline_review.md), and [earlier test results](docs/resnet50_test_results.md). CUB/ImageNet pretraining overlap is a known benchmark limitation and has not been audited here.
+> **Development status:** The source/data foundation, integrity audit, classification pipeline and statistical EDA are implemented. The ResNet-50 workflow supports ImageNet baselines and iNaturalist2021 pretraining, two-stage local training, MLflow tracking, classifier refits and official-test evaluation. Its selected iNaturalist model reached 85.23% test accuracy; a separate balanced candidate remains validation-only. The shared ConvNeXt-Tiny, EfficientNet-B3 and RegNetY-3.2GF pipeline also provides verified GPU preflight, completed-epoch recovery and a cloud acceptance notebook; genuine canonical cloud-training results for that pipeline remain pending. Grad-CAM, random-search comparison, single-image prediction and scratch-CNN comparison remain. See the [ResNet-50 workflow](docs/resnet50_training.md), [measured results](docs/resnet50_test_results.md) and [shared pretrained training guide](docs/pretrained_cnn_foundation.md).
 
 ## Overview
 
 | Task | Goal | Planned approach |
 | --- | --- | --- |
 | **Image classification** | Recognize 200 bird species | CNN trained from scratch, compared with transfer learning |
-| **Image colorization** | Reconstruct color from a grayscale image | Encoder–decoder model reusing the trained visual backbone |
+| **Image colorization** | Reconstruct color from a grayscale image | Encoderâ€“decoder model reusing the trained visual backbone |
 | **Image captioning** | Generate a natural-language image description | Frozen visual encoder with an autoregressive language decoder |
 
 The central design goal is to **learn visual features once and adapt them across multiple tasks**, while keeping the data pipeline, models, training, and evaluation components independent and reusable.
@@ -33,10 +33,10 @@ The encoder is first trained and evaluated through classification. Subsequent ta
 
 ## Dataset
 
-The project uses **Caltech–UCSD Birds-200-2011 (CUB-200-2011)** with associated text descriptions, available through Hugging Face:
+The project uses **Caltechâ€“UCSD Birds-200-2011 (CUB-200-2011)** with associated text descriptions, available through Hugging Face:
 
-- [Training split — `Multimodal-Fatima/CUB_train`](https://huggingface.co/datasets/Multimodal-Fatima/CUB_train)
-- [Test split — `Multimodal-Fatima/CUB_test`](https://huggingface.co/datasets/Multimodal-Fatima/CUB_test)
+- [Training split â€” `Multimodal-Fatima/CUB_train`](https://huggingface.co/datasets/Multimodal-Fatima/CUB_train)
+- [Test split â€” `Multimodal-Fatima/CUB_test`](https://huggingface.co/datasets/Multimodal-Fatima/CUB_test)
 - [Original CUB-200-2011 dataset](https://www.vision.caltech.edu/datasets/cub_200_2011/)
 
 | Property | Value |
@@ -49,7 +49,7 @@ The project uses **Caltech–UCSD Birds-200-2011 (CUB-200-2011)** with associate
 | Official test images | 5,794 |
 | Captions per image (documented expectation) | 10 |
 
-The source schema includes an image, its species label, and a `description` string. The full integrity audit verified ten structurally valid caption lines for every image in the pinned sources. The classification pipeline derives a reproducible validation partition from the official training split. Grayscale/RGB pairs for colorization remain planned. The official test split will be reserved for final evaluation.
+The source schema includes an image, its species label, and a `description` string. The full integrity audit verified ten structurally valid caption lines for every image in the pinned sources. The classification pipeline derives a reproducible validation partition from the official training split. Grayscale/RGB pairs for colorization remain planned. Official test images are excluded from parameter fitting; completed ResNet evaluations and their limitations are recorded in the results report.
 
 **Dataset files are not included in this repository.**
 
@@ -129,41 +129,125 @@ rows = load_classification_manifest("outputs/classification-v1")
 print(summary["partition_counts"])
 ```
 
-Verified preparation produced **4,794 training, 1,200 validation, and 5,794 official test rows**, with no exclusions. Every class has six validation rows; training has 23–24 rows per class. Splitting is class-stratified with seed 42; both exact-duplicate Pigeon Guillemot rows remain together in validation. Original labels, captions, source assets, and test assignments are preserved.
+Verified preparation produced **4,794 training, 1,200 validation, and 5,794 official test rows**, with no exclusions. Every class has six validation rows; training has 23â€“24 rows per class. Splitting is class-stratified with seed 42; both exact-duplicate Pigeon Guillemot rows remain together in validation. Original labels, captions, source assets, and test assignments are preserved.
 
-The lazy Dataset returns `{"image": tensor, "label": class_id, "image_id": stable_id}`. Default preprocessing fits the entire EXIF-corrected RGB image into a centered white 224×224 canvas, preserving aspect ratio within pixel rounding. Horizontal flipping applies only to training. Normalization is configurable; the earlier crop profile is an explicit alternative. Real CPU batches, loss/backpropagation, and Windows two-worker loading have been verified.
+The lazy Dataset returns `{"image": tensor, "label": class_id, "image_id": stable_id}`. Default preprocessing fits the entire EXIF-corrected RGB image into a centered white 224Ã—224 canvas, preserving aspect ratio within pixel rounding. Horizontal flipping applies only to training. Normalization is configurable; the earlier crop profile is an explicit alternative. Real CPU batches, loss/backpropagation, and Windows two-worker loading have been verified.
 
 Use Python 3.12 and [requirements-classification.txt](requirements-classification.txt) for the verified environment. See [the classification handoff](docs/classification_data.md) for installation, eligibility policy, split provenance, model-specific normalization, a Windows-safe batch example, and verification limits. Generated working artifacts under `outputs/`, environments, and caches remain ignored by Git; the reviewed shared `preparation/` snapshot is intended to be versioned.
+
+### ResNet-50 ImageNet and iNaturalist experiments
+
+The same ResNet-50 implementation supports two distinct pretraining choices:
+`configs/resnet50.yaml` selects the earlier ImageNet baseline, while
+`configs/resnet50_inaturalist.yaml` selects the authors' iNaturalist2021 checkpoint
+trained without ImageNet initialization. Their weights and experiment outputs
+are separate. The default runner configuration remains the ImageNet baseline;
+select the iNaturalist YAML explicitly for the reported iNaturalist results.
+
+After installing a suitable CUDA PyTorch build, install the workflow dependencies
+and run from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-resnet50.txt
+.\.venv\Scripts\python.exe -m src.training.resnet50_runner --config configs/resnet50_inaturalist.yaml --check-batch
+.\.venv\Scripts\python.exe -m src.training.resnet50_runner --config configs/resnet50_inaturalist.yaml --train
+```
+
+The iNaturalist pretraining file is an external input, verified against the
+SHA-256 pinned in the configuration; its download instructions are in the
+[training guide](docs/resnet50_training.md#inaturalist2021-pretraining-without-imagenet-initialization).
+Training prints each unique output directory. The recommended complete export
+uses the fine-tuned encoder and a regularized linear discriminant head, with
+86.67% validation and 85.23% official test accuracy. The stronger-regularization
+alternative has 85.75% validation accuracy and has not been tested. See the
+[selection and metrics](docs/resnet50_test_results.md) for exact model paths,
+reproduction commands, confidence calibration and remaining limitations.
+
+Model files, reports and local MLflow records are ignored by Git and delivered
+separately. Keep model configuration and class mapping with Google Drive exports.
+The ResNet encoder exposes spatial and pooled features for later project tasks.
+This workflow uses its own runner; the shared JSON-based CLI below supports the
+other pretrained adapters.
+
+### Available pretrained CNN foundation
+
+The Stage 1A adapters expose a shared classification and encoder interface for **ConvNeXt-Tiny, EfficientNet-B3, and RegNetY-3.2GF**. Each model produces 200 logits in the unchanged CUB class order and exposes spatial and pooled encoder features. Frozen, partial, and full fine-tuning policies preserve their parameter and normalization behavior across mode changes. A spatial target reference is available for future Grad-CAM integration; rendering remains planned.
+
+```python
+import torch
+
+from src.models.pretrained import ModelConfig, create_pretrained_model
+
+config = ModelConfig(architecture="convnext_tiny", fine_tuning="frozen")
+model = create_pretrained_model(config, load_weights=False).eval()
+with torch.no_grad():
+    logits = model(torch.zeros(1, 3, 224, 224))
+print(logits.shape)  # torch.Size([1, 200])
+```
+
+`load_weights=False` constructs an offline, randomly initialized encoder; it does not demonstrate pretrained quality. The default construction requests an explicit pinned torchvision weight enum and propagates loading errors. The prepared-data helper preserves the full-image 224-pixel fit profile and applies configurable normalization once; native weight crop recipes are metadata. See [the pretrained CNN guide](docs/pretrained_cnn_foundation.md) for exact weights, shapes, policy transitions, portable CPU setup, data integration, and verification limits.
+
+### Official pretrained GPU preflight
+
+Run [the Stage 1B-1 notebook](notebooks/pretrained/01_gpu_preflight.ipynb) on an online
+Colab GPU using [the exact setup and evidence-return steps](docs/gpu_preflight.md).
+It calls shared modules to verify official checkpoint hashes and retained backbone
+tensors, then checks all three models sequentially across frozen/partial/full
+policies, training backward checks, validation inference, supported AMP, memory and resident-batch inference
+throughput. It performs no optimizer updates. Existing CUDA Torch/Torchvision are
+inspected and preserved; canonical preparation metadata and pinned HF train images
+are supplied separately. The small metadata handoff ZIP contains no images.
+
+Returned T4 evidence verifies all three official checkpoints and 36/36 FP32/FP16
+checks. A later targeted automatic-precision run passed 12/12 checks and storage
+readback, selecting FP16 because this T4 lacks native BF16 support. PR 13 merged as
+`6ad1adfe47f339414693c2034658a32bc6df2ca6`; the guide preserves the earlier failed
+BF16 evidence and measurement limits. These preflight runs made zero optimizer updates.
+
+### First classification training acceptance
+
+Use [02_train_convnext.ipynb](notebooks/pretrained/02_train_convnext.ipynb) on online
+Colab GPU, with the full published training PR SHA and verified metadata ZIP.
+It preserves installed CUDA packages, mounts Drive and calls the shared trainer
+with [pretrained_acceptance.json](configs/pretrained_acceptance.json): ConvNeXt-Tiny,
+frozen two epochs, physical batch 8, accumulation 2, AdamW LR 0.001, FP16 and seed 42.
+The stable Drive run directory supports explicit resume; keep the entire directory.
+Return `run_summary.json` and `evidence.zip` for review. See the
+[training/recovery guide](docs/pretrained_cnn_foundation.md#classification-training-and-recovery).
+Local synthetic CPU tests establish orchestration/recovery only; real CUB training
+accuracy, updates, duration and cloud restoration remain **PENDING**.
 
 ## Project structure
 
 ```text
 pixels-to-language/
-├── configs/              # Experiment configurations
-├── docs/                 # Technical documentation and research notes
-├── notebooks/            # Exploratory analysis and experiments
-├── outputs/              # Generated figures, logs, and checkpoints (gitignored)
-├── preparation/          # Reviewed shared classification split and provenance
-├── src/
-│   ├── data/             # Dataset loading and preprocessing
-│   ├── analysis/         # Statistical EDA and report generation
-│   ├── models/           # Shared encoder and task-specific heads
-│   ├── training/         # Training workflows
-│   ├── evaluation/       # Metrics and benchmarking
-│   ├── visualization/    # EDA plots; model explainability planned
-│   └── utils/            # Shared utilities
-├── tests/                # Automated tests
-├── requirements-eda.txt  # Pinned statistical EDA dependencies
-├── requirements-classification.txt  # Verified classification data dependencies
-├── requirements.txt      # Anticipated model-training dependencies
-└── README.md
+â”œâ”€â”€ configs/              # Experiment configurations
+â”œâ”€â”€ docs/                 # Technical documentation and research notes
+â”œâ”€â”€ notebooks/            # Exploratory analysis and experiments
+â”œâ”€â”€ outputs/              # Generated figures, logs, and checkpoints (gitignored)
+â”œâ”€â”€ preparation/          # Reviewed shared classification split and provenance
+â”œâ”€â”€ src/
+â”‚   â”œâ”€â”€ data/             # Dataset loading and preprocessing
+â”‚   â”œâ”€â”€ analysis/         # Statistical EDA and report generation
+â”‚   â”œâ”€â”€ models/           # Shared encoder and task-specific heads
+â”‚   â”œâ”€â”€ training/         # Training workflows
+â”‚   â”œâ”€â”€ evaluation/       # Metrics and benchmarking
+â”‚   â”œâ”€â”€ visualization/    # EDA plots; model explainability planned
+â”‚   â””â”€â”€ utils/            # Shared utilities
+â”œâ”€â”€ tests/                # Automated tests
+â”œâ”€â”€ requirements-eda.txt  # Pinned statistical EDA dependencies
+â”œâ”€â”€ requirements-classification.txt  # Verified classification data dependencies
+â”œâ”€â”€ requirements.txt      # Pinned CPU development/training dependencies
+â””â”€â”€ README.md
 ```
 
-Model, training and evaluation implementations remain planned. Statistical analysis and EDA visualization modules are available. The repository intentionally contains no model implementations or runnable training commands at this stage.
+Model adapters, classification data integration, EDA, classification training,
+validation metrics, checkpoint recovery and a runnable training CLI are available.
 
 ## Getting started
 
-**Prerequisites:** Python 3.12 and Git for the verified data/EDA environment. A GPU is recommended for training once the pipeline is implemented.
+**Prerequisites:** Python 3.12 and Git for the verified CPU development environment.
+Use a cloud GPU for the first canonical training acceptance.
 
 From the repository root, create a virtual environment:
 
@@ -190,29 +274,28 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements-eda.txt
 ```
 
-> For classification data and the complete repository test suite, follow [the pinned CPU setup and batch example](docs/classification_data.md). EDA-only tests run with `python -m pytest -q tests/analysis`; complete tests also require the classification dependencies. The broader `requirements.txt` remains an anticipated model-training dependency list. Training and prediction commands are not implemented.
+> For classification training and the complete test suite, follow [the pinned CPU setup](docs/pretrained_cnn_foundation.md#cpu-development-setup). `requirements.txt` includes the classification pins and `mlflow-skinny==3.17.2`. EDA-only tests run with `python -m pytest -q tests/analysis`. Cloud notebooks preserve their installed CUDA stack and install only missing non-Torch dependencies.
 
-### Planned CLI
+### Classification training CLI
 
-The completed project will expose a consistent command-line interface for training and inference across all three tasks. For example, the intended usage will resemble:
+From a compatible CUDA environment with canonical preparation available:
 
 ```bash
-# Planned commands — not yet implemented
-python -m src.cli train --task classification --config configs/classification.yaml
-python -m src.cli train --task colorization --config configs/colorization.yaml
-python -m src.cli train --task caption --config configs/caption.yaml
-
-python -m src.cli predict --task caption --image path/to/image.jpg
+python -m src.cli train --task classification --config configs/pretrained_acceptance.json --prepared-dir outputs/classification-v1 --run-dir outputs/experiments/convnext-frozen-acceptance-v1 --device cuda
+# Reuse that directory only with explicit recovery:
+python -m src.cli train --task classification --config configs/pretrained_acceptance.json --prepared-dir outputs/classification-v1 --run-dir outputs/experiments/convnext-frozen-acceptance-v1 --device cuda --resume
 ```
 
-The actual commands and configuration files will be documented once the corresponding features exist.
+Local MLflow tracking is the default; `--tracking json` explicitly selects portable
+reports only. Prediction, colorization and caption training commands remain planned.
 
 ## Development roadmap
 
 - [x] **Data foundation:** Statistical EDA, source-preserving caption preparation, integrity audit, reproducible splits, transforms, and classification augmentation
+- [x] **Pretrained CNN foundation:** Three model adapters, 200-class heads, encoder features, fine-tuning policies, and prepared train/validation integration; verified on CPU without pretrained weights
 - [ ] **Classification:** CNN baseline trained from scratch, transfer learning, and model comparison
 - [ ] **Optimization and explainability:** Grid search, random search, experiment tracking, and Grad-CAM
-- [ ] **Colorization:** Grayscale-to-color encoder–decoder model
+- [ ] **Colorization:** Grayscale-to-color encoderâ€“decoder model
 - [ ] **Captioning:** Image-conditioned autoregressive caption generation
 - [ ] **Evaluation and delivery:** Benchmarks, reproducible CLI workflows, documentation, and demonstration
 
@@ -224,7 +307,8 @@ The actual commands and configuration files will be documented once the correspo
 | Colorization | PSNR, MAE, qualitative comparisons against ground truth |
 | Captioning | BLEU, ROUGE-L, generated captions compared with references |
 
-Experiments will be tracked with **MLflow** or an equivalent tool. Reported results will be based on actual experiments and compared with relevant published or open-source baselines where a fair comparison is possible.
+Classification experiments use local **MLflow** plus independent JSON/CSV reports.
+Reported results must come from actual experiments; baseline comparisons remain planned.
 
 ## Development guidelines
 
@@ -236,6 +320,6 @@ Experiments will be tracked with **MLflow** or an equivalent tool. Reported resu
 
 ## Acknowledgments
 
-Developed as part of **CSE 485 / CSE 488 — Deep Learning**, Faculty of Engineering, **Ain Shams University**. The project specification is titled *From Pixels to Language*.
+Developed as part of **CSE 485 / CSE 488 â€” Deep Learning**, Faculty of Engineering, **Ain Shams University**. The project specification is titled *From Pixels to Language*.
 
-The dataset originates from the [Caltech–UCSD Birds-200-2011 project](https://www.vision.caltech.edu/datasets/cub_200_2011/), with caption annotations distributed through the Hugging Face datasets linked above.
+The dataset originates from the [Caltechâ€“UCSD Birds-200-2011 project](https://www.vision.caltech.edu/datasets/cub_200_2011/), with caption annotations distributed through the Hugging Face datasets linked above.
