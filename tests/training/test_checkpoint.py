@@ -202,3 +202,50 @@ def test_read_requires_complete_validation_report_for_recovery(api, payload, tmp
     path.with_suffix('.pt.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest())
     with pytest.raises(ValueError, match='validation'):
         api.read_checkpoint(path)
+
+
+@pytest.mark.parametrize('mode', ['frozen', 'partial'])
+def test_schema_one_without_new_config_fields_resumes_legacy_optimizer(api, tmp_path, mode):
+    from src.training.trainer import TrainConfig, Phase, fit
+    config = TrainConfig(amp='off', batch_size=3, head_dropout=0.25,
+                         phases=(Phase(mode, 2, 0.01),), lr_decay=0.5)
+    def interrupt(record, validation):
+        if record['epoch'] == 2:
+            raise RuntimeError('interrupted')
+    torch.manual_seed(19)
+    fit(TinyAdapter(), tiny_loaders(), config, tmp_path / 'full',
+        data_identity=DATA_IDENTITY, weight_provenance=PROVENANCE)
+    torch.manual_seed(19)
+    with pytest.raises(RuntimeError, match='interrupted'):
+        fit(TinyAdapter(), tiny_loaders(), config, tmp_path / 'legacy', on_epoch=interrupt,
+            data_identity=DATA_IDENTITY, weight_provenance=PROVENANCE)
+    path = tmp_path / 'legacy' / 'latest.pt'
+    legacy = api.read_checkpoint(path)
+    assert len(legacy['optimizer_state']['param_groups']) == 1
+    assert legacy['training_config'].pop('selection_metric') == 'val_loss'
+    assert legacy['training_config']['phases'][0].pop('backbone_lr') is None
+    for row in legacy['history']:
+        row.pop('backbone_learning_rate')
+    torch.save(legacy, path)
+    path.with_suffix('.pt.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest())
+    loaded = api.read_checkpoint(path, expected_config=config)
+    assert loaded['training_config'] == config.to_dict()
+    resumed = fit(TinyAdapter(), tiny_loaders(), config, path.parent, resume=True,
+                  data_identity=DATA_IDENTITY, weight_provenance=PROVENANCE)
+    expected = api.read_checkpoint(tmp_path / 'full' / 'latest.pt')
+    assert resumed['best_epoch'] == expected['best_epoch']
+    assert resumed['history'][-1] == expected['history'][-1]
+    actual = api.read_checkpoint(path)
+    for name, tensor in expected['model_state'].items():
+        assert torch.equal(tensor, actual['model_state'][name]), name
+
+
+def test_checkpoint_rejects_later_tie_as_selected_best(api, payload, tmp_path):
+    payload['training_config']['phases'][0]['epochs'] = 2
+    payload['epochs_completed'] = payload['epoch_in_phase'] = 2
+    payload['optimizer_updates'] *= 2
+    payload['history'].append({**payload['history'][0], 'epoch': 2, 'epoch_in_phase': 2,
+                              'total_optimizer_updates': payload['optimizer_updates']})
+    payload['best_epoch'] = 2
+    with pytest.raises(ValueError, match='best|validation'):
+        api.save_checkpoint(tmp_path / 'late-tie.pt', payload)

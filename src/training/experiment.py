@@ -111,11 +111,13 @@ def _sync_tracking(client, directory, state, config, history):
             elif tracked.data.params[key] != str(value):
                 raise ValueError(f'MLflow parameter differs from saved run: {key}')
         # A restart may follow a logging interruption. Fill missing points only.
-        metric_names = [key for key, value in history[0].items()
-                        if type(value) in (int, float) and key != 'epoch'] if history else []
+        metric_names = list(dict.fromkeys(key for row in history for key, value in row.items()
+                                         if type(value) in (int, float) and key != 'epoch'))
         for key in metric_names:
             logged = {point.step: point.value for point in client.get_metric_history(run_id, key)}
             for row in history:
+                if type(row.get(key)) not in (int, float):
+                    continue
                 if row['epoch'] in logged:
                     if logged[row['epoch']] != row[key]:
                         raise ValueError(f'MLflow metric differs from checkpoint: {key}')
@@ -153,7 +155,8 @@ def _export_checkpoints(directory, config, identity):
     latest = read_checkpoint(directory / 'latest.pt', expected_config=config, expected_data_identity=identity)
     best = _validated_best(directory, config, latest)
     _write_json(directory / 'history.json', latest['history'])
-    _write_csv(directory / 'history.csv', latest['history'], list(latest['history'][0]))
+    fields = list(dict.fromkeys(key for row in latest['history'] for key in row))
+    _write_csv(directory / 'history.csv', latest['history'], fields)
     for suffix, payload in (('best', best), ('latest', latest)):
         validation = payload['validation']
         _write_json(directory / f'validation-{suffix}.json',
@@ -251,12 +254,14 @@ def _finish(directory, config, state, client, *, reload_proof=None, log_completi
 
 
 def run_training(prepared_dir, run_dir, config, *, device='cuda', resume=False,
-                 tracking='mlflow', source=None) -> dict:
+                 tracking='mlflow', source=None, initial_checkpoint=None) -> dict:
     """Run or resume classification using canonical metadata and pinned weights.
 
     config accepts TrainConfig or its plain JSON mapping. Terminal resume needs
     no prepared data/source pixels: checkpoint config and identity are checked
     first, then saved portable results are regenerated without training.
+    initial_checkpoint starts a fresh experiment from validated model weights;
+    its optimizer, scheduler, scaler, progress and RNG state are not restored.
     """
     config = config if isinstance(config, TrainConfig) else TrainConfig.from_dict(config)
     if config.seed != 42:
@@ -265,6 +270,8 @@ def run_training(prepared_dir, run_dir, config, *, device='cuda', resume=False,
         raise ValueError('tracking must be mlflow or json')
     if type(resume) is not bool:
         raise TypeError('resume must be bool')
+    if resume and initial_checkpoint is not None:
+        raise ValueError('initial_checkpoint and resume are mutually exclusive')
     device = torch.device(device)
     directory = Path(run_dir).resolve()
     prepared = Path(prepared_dir).resolve()
@@ -308,15 +315,33 @@ def run_training(prepared_dir, run_dir, config, *, device='cuda', resume=False,
         raise ValueError('Checkpoint data identity mismatch')
     if saved is not None and saved['resolved_precision'] != precision:
         raise ValueError('Resolved precision differs from checkpoint')
+    initial_payload = None
+    if initial_checkpoint is not None:
+        parent = Path(initial_checkpoint)
+        initial_payload = read_checkpoint(parent, expected_data_identity=identity)
+        for key in ('architecture', 'head_dropout', 'freeze_bn_stats'):
+            if initial_payload['model_config'][key] != getattr(config, key):
+                raise ValueError(f'Initial checkpoint model config mismatch: {key}')
+        # Check tensor keys, shapes and dtypes offline before opening any pixels.
+        model, initial_payload = load_model_checkpoint(parent, device=device, expected_data_identity=identity)
+        model.set_fine_tuning(config.phases[0].mode, freeze_bn_stats=config.freeze_bn_stats)
+        provenance = dict(initial_payload['weight_provenance'])
+        provenance['initial_checkpoint'] = {
+            'filename': parent.name, 'sha256': _sha256(parent),
+            'epochs_completed': initial_payload['epochs_completed'],
+            'weight_provenance': initial_payload['weight_provenance'],
+        }
     if saved is None:
         state = {'status': 'running', 'started_at': datetime.now(timezone.utc).isoformat(),
                  'elapsed_seconds': 0.0, 'device': str(device), 'resolved_precision': precision,
                  'runtime': collect_runtime(), 'data_identity': identity, 'failures': [],
                  'tracking': {'mode': tracking, 'status': 'disabled' if tracking == 'json' else 'pending',
                               'run_id': None, 'location': 'mlruns' if tracking == 'mlflow' else None}}
+    if initial_payload is not None:
+        state['weight_provenance'] = provenance
     state['status'] = 'running'
     state['device'] = str(device)
-    # Import requested tracking before opening pixels or constructing a model.
+    # Import requested tracking before opening pixels.
     directory.mkdir(parents=True, exist_ok=True)
     client = _open_tracking(directory, state)
     _write_json(directory / 'run_state.json', state)
@@ -339,7 +364,8 @@ def run_training(prepared_dir, run_dir, config, *, device='cuda', resume=False,
             random.seed(config.seed)
             np.random.seed(config.seed)
             torch.manual_seed(config.seed)
-            model, provenance = build_verified_pretrained_model(model_config)
+            if initial_payload is None:
+                model, provenance = build_verified_pretrained_model(model_config)
             state['weight_provenance'] = provenance
         else:
             provenance = saved['weight_provenance']

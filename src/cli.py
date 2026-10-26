@@ -14,15 +14,20 @@ def main(argv=None):
     train.add_argument('--prepared-dir', type=Path, required=True)
     train.add_argument('--run-dir', type=Path, required=True)
     train.add_argument('--device', default='cuda')
-    train.add_argument('--resume', action='store_true')
+    initialization = train.add_mutually_exclusive_group()
+    initialization.add_argument('--resume', action='store_true')
+    initialization.add_argument('--initial-checkpoint', type=Path,
+                                help='Initialize a fresh run from checkpoint model weights only')
     train.add_argument('--tracking', choices=['mlflow', 'json'], default='mlflow')
     args = parser.parse_args(argv)
     from src.training.runtime import _failure
     try:
         from src.training.experiment import run_training
         config = json.loads(args.config.read_text(encoding='utf-8'))
+        initialization_options = ({'initial_checkpoint': args.initial_checkpoint}
+                                  if args.initial_checkpoint is not None else {})
         summary = run_training(args.prepared_dir, args.run_dir, config, device=args.device,
-                               resume=args.resume, tracking=args.tracking)
+                               resume=args.resume, tracking=args.tracking, **initialization_options)
         print(json.dumps(summary, allow_nan=False))
         return 0
     except KeyboardInterrupt:

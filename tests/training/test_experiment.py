@@ -578,3 +578,120 @@ def test_completion_log_append_failure_records_failed_and_terminal_resume_repair
     assert client.get_run(run_id).info.status == 'FINISHED'
     assert checkpoints == {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in checkpoints}
     assert any(item['stage'] == 'finalization' for item in repaired['failures'])
+
+
+def test_initial_checkpoint_reuses_weights_with_fresh_training_state_and_provenance(setup, monkeypatch):
+    import src.training.trainer as trainer
+    import src.training.checkpoint as checkpoint
+    run(setup)
+    api, config, identity, parent_dir = setup
+    parent = parent_dir / 'best.pt'
+    # Preserve an actual legacy on-disk config without the newly optional keys.
+    legacy = torch.load(parent, weights_only=True, map_location='cpu')
+    legacy['training_config'].pop('selection_metric', None)
+    for phase in legacy['training_config']['phases']:
+        phase.pop('backbone_lr', None)
+    torch.save(legacy, parent)
+    parent.with_suffix('.pt.sha256').write_text(hashlib.sha256(parent.read_bytes()).hexdigest() + '\n')
+    saved = read_checkpoint(parent)
+    assert saved['model_config']['fine_tuning'] == 'frozen'
+    before = {path: path.read_bytes() for path in (parent, parent.with_suffix('.pt.sha256'))}
+    new_config = replace(config, phases=(Phase('partial', 1, 0.003, backbone_lr=0.00003),),
+                         selection_metric='val_macro_f1')
+    original_epoch = trainer.train_epoch
+    observed = []
+
+    def inspect_epoch(model, loader, optimizer, *args, **kwargs):
+        assert model.config.fine_tuning == 'partial'
+        assert all(parameter.requires_grad for parameter in model.encoder.parameters())
+        assert not optimizer.state
+        assert [group['lr'] for group in optimizer.param_groups] == [0.003, 0.00003]
+        assert {id(p) for p in optimizer.param_groups[0]['params']} == {id(p) for p in model.head.parameters()}
+        assert {id(p) for p in optimizer.param_groups[1]['params']} == {id(p) for p in model.encoder.parameters()}
+        assert torch.equal(torch.get_rng_state(), torch.Generator().manual_seed(42).get_state())
+        for name, tensor in model.state_dict().items():
+            torch.testing.assert_close(tensor, saved['model_state'][name], rtol=0, atol=0)
+        observed.append(True)
+        return original_epoch(model, loader, optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(trainer, 'train_epoch', inspect_epoch)
+    monkeypatch.setattr(api, 'build_verified_pretrained_model', forbidden)
+    monkeypatch.setattr(checkpoint, 'restore_rng_state', forbidden)
+    result = api.run_training(parent_dir.parent / 'prepared', parent_dir.parent / 'warmstart', new_config,
+                              initial_checkpoint=parent, device='cpu', tracking='json')
+    assert observed == [True]
+    assert result['epochs_completed'] == 1
+    assert result['optimizer_updates'] == 5
+    assert result['history'][0]['epoch'] == 1
+    provenance = result['weight_provenance']
+    assert provenance['sha256'] == 'c' * 64
+    initial = provenance['initial_checkpoint']
+    assert initial['filename'] == 'best.pt'
+    assert initial['sha256'] == hashlib.sha256(before[parent]).hexdigest()
+    assert initial['epochs_completed'] == saved['epochs_completed']
+    assert initial['weight_provenance'] == saved['weight_provenance']
+    child = read_checkpoint(parent_dir.parent / 'warmstart' / 'latest.pt')
+    assert child['weight_provenance'] == provenance
+    assert child['training_config'] == new_config.to_dict()
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+
+
+@pytest.mark.parametrize('damage', ['identity', 'architecture', 'head_dropout', 'freeze_bn_stats', 'tensor', 'corrupt'])
+def test_initial_checkpoint_rejects_incompatible_parent_before_pixels_or_updates(setup, monkeypatch, damage):
+    from src.training.checkpoint import save_checkpoint
+    run(setup)
+    api, config, identity, parent_dir = setup
+    parent = parent_dir / 'best.pt'
+    if damage == 'identity':
+        monkeypatch.setattr(api, 'validate_preflight_preparation', lambda path: dict(identity, class_names=list(reversed(identity['class_names']))))
+    elif damage in ('architecture', 'head_dropout', 'freeze_bn_stats'):
+        values = {'architecture': 'efficientnet_b3', 'head_dropout': 0.4, 'freeze_bn_stats': False}
+        config = replace(config, **{damage: values[damage]})
+    elif damage == 'tensor':
+        payload = read_checkpoint(parent)
+        payload['model_state']['head.1.weight'] = torch.zeros(1)
+        save_checkpoint(parent, payload)
+    else:
+        parent.write_bytes(b'corrupt parent')
+    before = {path: path.read_bytes() for path in (parent, parent.with_suffix('.pt.sha256'))}
+    for name in ('make_pretrained_loaders', 'build_verified_pretrained_model', 'fit'):
+        monkeypatch.setattr(api, name, forbidden)
+    with pytest.raises(ValueError):
+        api.run_training(parent_dir.parent / 'prepared', parent_dir.parent / 'warmstart', config,
+                         initial_checkpoint=parent, device='cpu', tracking='json')
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+
+
+def test_initial_checkpoint_and_resume_are_mutually_exclusive_before_io(setup, monkeypatch):
+    api, config, _, directory = setup
+    for name in ('read_checkpoint', 'validate_preflight_preparation', 'make_pretrained_loaders'):
+        monkeypatch.setattr(api, name, forbidden)
+    with pytest.raises(ValueError, match='initial_checkpoint.*resume|resume.*initial_checkpoint'):
+        run(setup, resume=True, initial_checkpoint=directory / 'missing.pt')
+
+
+def test_optional_backbone_lr_exports_and_tracks_across_frozen_and_legacy_rows(setup, monkeypatch):
+    pytest.importorskip('mlflow')
+    from mlflow.tracking import MlflowClient
+    from src.training.checkpoint import save_checkpoint
+    api, config, _, directory = setup
+    config = replace(config, phases=(Phase('frozen', 1, 0.001),
+                                     Phase('partial', 1, 0.001, backbone_lr=0.00003)))
+    result = api.run_training('prepared', directory, config, device='cpu', tracking='mlflow')
+    client = MlflowClient(tracking_uri=(directory / 'mlruns').as_uri())
+    run_id = result['tracking']['run_id']
+    assert [(point.step, point.value) for point in client.get_metric_history(run_id, 'backbone_learning_rate')] == [(2, 0.00003)]
+    for name in ('best.pt', 'latest.pt'):
+        payload = read_checkpoint(directory / name)
+        payload['history'][0].pop('backbone_learning_rate')
+        save_checkpoint(directory / name, payload)
+    for name in ('fit', 'make_pretrained_loaders', 'build_verified_pretrained_model', 'validate_preflight_preparation'):
+        monkeypatch.setattr(api, name, forbidden)
+    repaired = api.run_training('missing', directory, config, device='cpu', tracking='mlflow', resume=True)
+    assert repaired['status'] == 'completed'
+    assert repaired['tracking']['status'] == 'finished'
+    with (directory / 'history.csv').open(newline='') as stream:
+        rows = list(csv.DictReader(stream))
+    assert rows[0]['backbone_learning_rate'] == ''
+    assert float(rows[1]['backbone_learning_rate']) == 0.00003
+    assert [(point.step, point.value) for point in client.get_metric_history(run_id, 'backbone_learning_rate')] == [(2, 0.00003)]

@@ -346,8 +346,9 @@ def test_config_rejects_invalid_values(api, kwargs):
 def test_fit_resume_matches_uninterrupted_rng_and_phase_state(api, tmp_path, interrupt_after):
     assert hasattr(api, 'fit'), 'fit is missing'
     from src.training.checkpoint import read_checkpoint
-    config = tiny_config(api, phases=(api.Phase('frozen', 2, 0.01), api.Phase('partial', 2, 0.003)),
-                         lr_decay=0.5)
+    config = tiny_config(api, phases=(api.Phase('frozen', 2, 0.01, backbone_lr=0.001),
+                                      api.Phase('partial', 2, 0.003, backbone_lr=0.0003)),
+                         lr_decay=0.5, selection_metric='val_macro_f1')
     def callback(record, validation):
         random.random()
         np.random.random()
@@ -370,6 +371,8 @@ def test_fit_resume_matches_uninterrupted_rng_and_phase_state(api, tmp_path, int
     split = read_checkpoint(tmp_path / 'split' / 'latest.pt')
     assert result['history'] == full['history']
     assert [row['learning_rate'] for row in result['history']] == [0.01, 0.005, 0.003, 0.0015]
+    assert [row['backbone_learning_rate'] for row in result['history']] == [None, None, 0.0003, 0.00015]
+    assert len(split['optimizer_state']['param_groups']) == 2
     assert result['optimizer_updates'] == 8
     for name, tensor in full['model_state'].items():
         assert torch.equal(tensor, split['model_state'][name]), name
@@ -500,3 +503,74 @@ def test_fit_rejects_missing_manifest_identity_before_updating_weights(api, tmp_
         api.fit(model, tiny_loaders(), tiny_config(api), tmp_path,
                 data_identity={'class_names': CLASS_NAMES}, weight_provenance=PROVENANCE)
     assert torch.equal(before, model.head[1].weight)
+
+
+@pytest.mark.parametrize('value', [0, -0.1, True, float('nan'), float('inf')])
+def test_phase_rejects_invalid_backbone_lr(api, value):
+    with pytest.raises(ValueError, match='backbone_lr'):
+        api.Phase(backbone_lr=value)
+
+
+def test_config_rejects_unknown_selection_metric(api):
+    with pytest.raises(ValueError, match='selection_metric'):
+        tiny_config(api, selection_metric='val_accuracy')
+
+
+def test_fit_separate_rates_update_head_and_only_unfrozen_backbone(api, tmp_path, monkeypatch):
+    model = TinyAdapter(dropout=0)
+    model.encoder_norm = nn.LayerNorm(4)
+    model.forward = lambda images: model.head(model.encoder_norm(model.encoder(images)))
+    config = api.TrainConfig(amp='off', batch_size=7, accumulation_steps=1, weight_decay=0,
+                            phases=tuple(api.Phase(mode, 1, 0.01, backbone_lr=0.001)
+                                         for mode in ('frozen', 'partial', 'full')))
+    loaders = make_classification_loaders({'train': RandomSamples(True), 'val': RandomSamples(False)},
+                                         batch_size=7, seed=42)
+    train = api.train_epoch
+    seen = []
+    def inspect_updates(model, loader, optimizer, device, **kwargs):
+        groups = [{id(p) for p in group['params']} for group in optimizer.param_groups]
+        assert groups[0] == {id(p) for p in model.head.parameters()}
+        backbone = {id(p) for name, p in model.named_parameters()
+                    if not name.startswith('head.') and p.requires_grad}
+        assert groups[1:] == ([backbone] if backbone else [])
+        before = {name: p.detach().clone() for name, p in model.named_parameters()}
+        result = train(model, loader, optimizer, device, **kwargs)
+        for name, parameter in model.named_parameters():
+            if parameter.requires_grad:
+                expected = 0.01 if name.startswith('head.') else 0.001
+                assert (parameter - before[name]).abs().max().item() == pytest.approx(expected, abs=1e-5)
+            else:
+                assert torch.equal(parameter, before[name]), name
+        seen.append(model.config.fine_tuning)
+        return result
+    monkeypatch.setattr(api, 'train_epoch', inspect_updates)
+    result = api.fit(model, loaders, config, tmp_path, data_identity=DATA_IDENTITY,
+                     weight_provenance=PROVENANCE)
+    assert seen == ['frozen', 'partial', 'full']
+    assert [row['backbone_learning_rate'] for row in result['history']] == [None, 0.001, 0.001]
+
+
+def test_fit_f1_selects_earliest_best_and_uses_f1_delta_for_stopping(api, tmp_path, monkeypatch):
+    evaluate = api.evaluate
+    metrics = iter([(5.0, 0.4), (4.0, 0.5), (3.0, 0.5), (2.0, 0.52), (1.0, 0.51)])
+    def prescribed_metrics(*args, **kwargs):
+        result = evaluate(*args, **kwargs)
+        result['loss'], result['macro_f1'] = next(metrics)
+        return result
+    monkeypatch.setattr(api, 'evaluate', prescribed_metrics)
+    config = tiny_config(api, phases=(api.Phase(epochs=8),), selection_metric='val_macro_f1',
+                         patience=3, min_delta=0.05)
+    result = run_tiny(api, tmp_path, config)
+    assert result['epochs_completed'] == 5
+    assert result['stop_reason'] == 'early_stopping'
+    assert result['best_epoch'] == 4
+    assert result['best_loss'] == 1.0
+    assert [row['is_best'] for row in result['history']] == [True, True, False, True, False]
+    from src.training.checkpoint import read_checkpoint
+    best = read_checkpoint(tmp_path / 'best.pt')
+    latest = read_checkpoint(tmp_path / 'latest.pt')
+    assert best['epochs_completed'] == 4
+    assert best['best_epoch'] == 4
+    assert latest['early_stop_best'] == 0.5
+    assert latest['bad_epochs'] == 3
+    assert run_tiny(api, tmp_path, config, resume=True) == result
