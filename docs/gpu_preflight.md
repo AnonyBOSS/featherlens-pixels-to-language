@@ -7,17 +7,19 @@ weights, features, finite loss/backward gradients, fine-tuning policies, support
 AMP, memory and resident-batch inference throughput. It performs no optimizer
 updates, tuning, model selection, or substantive training.
 
-| Evidence | Verified state after the first Colab run |
+| Evidence | Verified state after returned Colab runs |
 | --- | --- |
 | Shared verification code, thin notebook and setup instructions | COMPLETED |
 | Focused CPU-safe import, config, cache, comparison and report tests | TESTED locally; see PR verification report for counts |
 | All three exact official checkpoints and retained backbone states | VERIFIED in returned Colab evidence |
 | All three models, frozen/partial/full, FP32 training backward and validation inference | VERIFIED: 18/18 checks passed |
-| EfficientNet-B3 and RegNetY-3.2GF BF16 execution | 12/12 checks passed; this T4 has no native BF16 support |
-| ConvNeXt-Tiny BF16 execution on this T4 | FAILED: 6/6 checks; incorrect automatic precision selection |
-| Native FP16 rerun and complete GPU acceptance | PENDING |
+| First run: EfficientNet-B3 and RegNetY-3.2GF BF16 execution | 12/12 checks passed; this T4 has no native BF16 support |
+| First run: ConvNeXt-Tiny BF16 execution on this T4 | FAILED: 6/6 checks; incorrect automatic precision selection |
+| All three models, frozen/partial/full, FP32 and explicit FP16 | VERIFIED: 36/36 checks passed in the returned rerun |
+| Corrected automatic precision on T4 | VERIFIED: targeted ConvNeXt-Tiny 12/12 FP32/FP16 checks; native BF16 false |
+| Targeted automatic run evidence ZIP/inventory and storage readback | VERIFIED; PR 13 merged as `6ad1adfe47f339414693c2034658a32bc6df2ca6` |
 | GPU memory and short resident-batch FP32 inference measurements | Recorded in returned evidence; not training benchmarks |
-| Fresh-session persistence and Kaggle offline packaging | PENDING |
+| Fresh-session training restoration and Kaggle offline packaging | PENDING |
 
 Configured weight names, synthetic checkpoints, mocked CUDA calls and CPU smoke
 tests do not establish genuine pretrained/GPU execution. The local environment is
@@ -54,13 +56,35 @@ The ZIP inventory and standalone report were independently checked. Generated
 evidence stays outside Git. The measured inference times cover only ten images
 after warm-up; they cannot establish architecture rankings or training budgets.
 
-For a quick rerun in the existing clean checkout, the original runner already
-accepts explicit `amp="float16"`. Use all three architectures, new output and
-mounted-Drive directories, and return the new evidence. That report will correctly
-identify the original commit and explicit FP16 configuration. Verification of
-the updated automatic selection on a GPU remains a separate pending claim until
-the fixed published commit is executed. No Torch/CUDA reinstall is required to
-change the configured precision, and source data and weight caches can be reused.
+The subsequent all-three-model rerun explicitly selected `amp="float16"` and
+passed 36/36 FP32/FP16 checks. A later clean published correction run targeted
+ConvNeXt-Tiny with `amp="auto"` and passed 12/12 checks, selecting FP16 with native
+BF16 support false. Its report, evidence ZIP/inventory and storage readback were
+verified before PR 13 merged as `6ad1adfe47f339414693c2034658a32bc6df2ca6`.
+The earlier failures remain part of the record. These are zero-update preflight
+proofs, not training metrics or fresh-session training recovery proofs.
+No Torch/CUDA reinstall was needed; source and weight caches were preserved.
+
+## Next: first canonical training acceptance
+
+Use [02_train_convnext.ipynb](../notebooks/pretrained/02_train_convnext.ipynb) on
+online Colab GPU at its full published training PR SHA. It reuses the tested
+bootstrap/metadata patterns below, mounts Drive, loads the acceptance JSON and
+calls `run_training` once. The initial ConvNeXt-Tiny run freezes two epochs with
+physical batch 8, accumulation 2, FP16, seed 42 and workers 0. Batch 8 is a
+conservative choice from T4 preflight headroom; actual resource use is measured
+by the notebook, with no duration promise. Existing CUDA packages and global
+pixel/weight caches are preserved. Do not install CPU requirements in Colab.
+
+Keep the stable Drive directory
+`/content/drive/MyDrive/featherlens/experiments/convnext-frozen-acceptance-v1` and
+set `RESUME=True` explicitly to recover with the same code/config/preparation.
+Return `run_summary.json` and `evidence.zip`, retaining the entire experiment,
+checkpoints, integrity sidecars and `mlruns` separately. See
+[training and recovery](pretrained_cnn_foundation.md#classification-training-and-recovery)
+for exact outputs, CLI/API and limitations. Expected updates are 600 only if all
+steps succeed; actual history is authoritative. **Real canonical training metrics,
+updates, cloud checkpoints and fresh-session restoration remain PENDING.**
 
 ## First run: online Colab GPU
 
@@ -233,6 +257,7 @@ leave acceptance pending. Immediate readback cannot establish fresh-session dura
 
 Return `preflight-report.json` and `preflight-evidence.zip` even when the run fails
 or reports pending. Review the JSON before declaring any model cloud-verified.
-Fresh-session storage durability requires a later read of the same artifacts. The
-smallest next step is one online Colab GPU run at the published commit, then review
-its genuine evidence before proposing Stage 1B-2 or a first training run.
+Fresh-session storage durability requires a later read of the same artifacts.
+Preflight evidence has now been returned and reviewed as described above; the
+next experiment is the bounded Stage 1B2 training notebook, whose genuine
+training evidence remains pending.

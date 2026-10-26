@@ -4,11 +4,13 @@ Stage 1A supplies three torchvision model adapters, separate 200-class heads,
 reusable encoder features, fine-tuning policies, and a thin connection to the
 existing classification data pipeline. It preserves the Task 1.1 source, audit,
 preparation, image, and sample contracts. This is a foundation for experiments;
-actual pretrained-weight execution and GPU verification belong to Stage 1B.
+Stage 1B now supplies verified official weights, GPU preflight and classification
+training/recovery. Genuine canonical training results are still pending.
 
 ## CPU development setup
 
-Use Python 3.12 and the existing [classification requirements](../requirements-classification.txt).
+Use Python 3.12 and the pinned [training requirements](../requirements.txt), which
+include the classification requirements and `mlflow-skinny==3.17.2`.
 From the repository root, create and activate a virtual environment:
 
 ```bash
@@ -20,7 +22,7 @@ macOS/Linux, use `source .venv/bin/activate`. With that environment active:
 
 ```bash
 python -m pip install torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cpu
-python -m pip install -r requirements-classification.txt
+python -m pip install -r requirements.txt
 python -m pip check
 ```
 
@@ -28,7 +30,8 @@ The established development environment is Windows Python 3.12.15 with torch
 `2.14.1+cpu` and torchvision `0.29.1+cpu`. These instructions describe CPU
 development. A cloud CUDA environment needs compatible accelerator builds and
 its own verification. Direct dependencies are pinned; this is not a complete
-transitive lockfile. No new dependencies are required for Stage 1A.
+transitive lockfile. The cloud notebook inspects and preserves its CUDA stack;
+do not apply these CPU installation commands to Colab/Kaggle.
 
 All examples run from the repository root with the environment active. Keep
 downloaded weights, source caches, prepared manifests, and experiment outputs out
@@ -310,7 +313,80 @@ workers seed Python and NumPy from PyTorch's worker seed. With zero workers,
 training augmentation uses the caller's RNG, so seed it before iteration as
 above. Recreate loaders and reset caller seeds to reproduce a run. Worker count,
 library versions, and iteration schedule remain part of reproducibility. The
-helper supplies no checkpointed RNG restoration or training loop.
+data helper supplies no checkpointed RNG restoration or training loop; the
+classification trainer below owns those responsibilities.
+
+## Classification training and recovery
+
+Run [02_train_convnext.ipynb](../notebooks/pretrained/02_train_convnext.ipynb) in an
+online Colab GPU runtime. Set the full published training PR SHA; use a fresh
+kernel and the verified canonical metadata ZIP. Setup verifies exact clean Git
+HEAD before project imports, preserves CUDA packages and global source/weight
+caches, installs only missing non-Torch dependencies and prints `pip check`
+conflicts. On Kaggle only, seven reviewed unrelated image-package relationships
+(BigFrames, Colab, Dopamine, Gradio and MoviePy owners) produce visible warnings
+without package repairs. Unknown relationships, malformed/process errors and
+failed required training imports remain fatal; Colab keeps strict checking.
+Metadata validation requires manifest SHA-256
+`a8bd05e048febf32df6d84a6e1bc16eddf6416be723e12dfc89621044962736b` before pixel access.
+Only the pinned official-training source supplies train/validation images.
+
+The notebook loads `configs/pretrained_acceptance.json` through `TrainConfig.from_dict`
+and calls the same API as `python -m src.cli train --task classification`:
+
+```python
+import json
+from pathlib import Path
+from src.training.trainer import TrainConfig
+from src.training.experiment import run_training
+
+config = TrainConfig.from_dict(json.loads(Path("configs/pretrained_acceptance.json").read_text()))
+summary = run_training(
+    "outputs/classification-v1", "outputs/experiments/convnext-frozen-acceptance-v1",
+    config, device="cuda", resume=False, tracking="mlflow",
+)
+```
+
+The initial acceptance freezes ConvNeXt-Tiny for two epochs with physical batch 8,
+accumulation 2, AdamW LR 0.001/decay 0.0001, seed 42, FP16, workers 0 and frozen
+BN statistics. Full-image white 224 fitting, ImageNet normalization and train-only
+flips are unchanged. Expect 600 successful updates only if all accumulation steps
+succeed; actual history and skipped AMP updates decide the count. This is a
+bounded acceptance experiment, with no tuned accuracy or duration promise.
+
+Colab uses the stable Drive path
+`/content/drive/MyDrive/featherlens/experiments/convnext-frozen-acceptance-v1`.
+Preserve the **entire run directory**. To recover, restore the same published code,
+canonical preparation and config, then set `resume=True` (CLI: `--resume`) and the
+same directory/tracking mode. One writer only. A fresh call refuses nonempty runs;
+changed configs need a new run name. `latest.pt` is authoritative at completed
+epochs, with optimizer/scaler/scheduler/RNG state; partial epochs are replayed.
+Before the first completed checkpoint, retain failure evidence and choose a new
+name. Completed runs regenerate reports without duplicate training. CPU recovery
+tests do not establish fresh-session GPU or cross-version restoration.
+
+`run_summary.json` records actual best/latest validation aggregates, successful and
+skipped updates, runtime, checkpoint hashes, reload proof and tracking ID/status.
+`history.json`/`.csv`, validation JSON, image-ID prediction CSVs and `run.log` remain
+independent of MLflow. A genuine training completion reloads the best checkpoint
+and verifies finite 200-class logits on a validation batch; terminal recovery can
+instead report `state_loaded_without_forward`. Inspect the actual proof and failures.
+Return `run_summary.json` and `evidence.zip`; the ZIP includes a SHA inventory but
+excludes checkpoints, datasets, caches and `mlruns`. Keep latest/best `.pt` files,
+their SHA sidecars and local tracking separately in Drive. JSON-only tracking is
+available through `tracking="json"` / `--tracking json`; MLflow uses the local
+`run_dir/mlruns` FileStore without a server or autologging. Logging failures are
+visible and can be reconciled with the same run ID on resume. FileStore artifact
+location relocation across machines is not guaranteed.
+
+Kaggle online uses Internet + GPU, `CLOUD="kaggle"`, attached metadata under
+`/kaggle/input`, and runs under `/kaggle/working/experiments`. **Save Version** is
+required to retain session outputs; download and verify the entire saved run.
+No offline training package or cloud storage durability guarantee is provided.
+
+Local trainer/checkpoint/controller tests use synthetic CPU fixtures; real CUB
+training metrics, actual updates, cloud checkpoints and fresh-session restoration
+remain **PENDING** until the user returns cloud evidence.
 
 ## Provenance, verification, and limits
 
@@ -350,7 +426,8 @@ official-training source, and reproduced validation pixels and logits. All
 three models recorded `weights_loaded=False` and `loaded_weight_id=None`.
 Compatibility checks passed for the 53 dependency packages without requirements
 changes. This verifies CPU integration with real data and random initialization;
-actual pretrained weights and GPU execution remain unverified.
+this historical Stage 1A check did not verify actual pretrained weights or GPU
+execution. Subsequent Stage 1B1 evidence below establishes those checks separately.
 
 Run the CPU suite from the active environment:
 
@@ -363,9 +440,11 @@ The opt-in cached real-data test requires a populated pinned source cache and
 and EDA measurements remain documented in their original handoffs. They do not
 constitute a new pretrained-model or GPU experiment.
 
-Stage 1B must verify actual pinned weights and accelerator behavior before
-reporting pretrained results. Training, inference CLI, optimizer/trainer,
-checkpointing, experiment tracking, search, CAM rendering, trained weights,
-scratch CNNs, and downstream colorization/captioning remain outside Stage 1A.
-No accuracy, throughput, memory, or GPU-performance claim follows from these
-foundation tests.
+Stage 1B1 returned T4 evidence verified all three official weights and all 36
+FP32/FP16 checks. A later targeted automatic-precision run passed 12/12 checks
+and storage readback; PR 13 merged as
+`6ad1adfe47f339414693c2034658a32bc6df2ca6`. See the
+[GPU evidence guide](gpu_preflight.md) for the preserved BF16 failure and limits.
+Preflight performed zero optimizer updates. Training/recovery/tracking now exist,
+while genuine canonical training evidence, prediction CLI, model comparison,
+search, CAM rendering, scratch CNNs and downstream tasks remain pending.

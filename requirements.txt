@@ -1,12 +1,3 @@
-# Anticipated project dependencies. Pin versions when working code is added.
-torch
-torchvision
-datasets
-fsspec
-numpy
-Pillow
-matplotlib
-scikit-learn
-PyYAML
-mlflow
-pytest
+# Full CPU development/training environment. Install GPU Torch separately.
+-r requirements-classification.txt
+mlflow-skinny==3.17.2
