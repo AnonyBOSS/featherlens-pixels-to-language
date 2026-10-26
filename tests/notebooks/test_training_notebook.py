@@ -119,7 +119,7 @@ def test_dependency_setup_installs_only_missing_tracking_and_surfaces_conflicts(
     tree = ast.parse("".join(cell["source"]))
     tree.body[0].value = ast.Constant(install)
     ast.fix_missing_locations(tree)
-    namespace = {"importlib": importlib, "sys": sys, "subprocess": subprocess}
+    namespace = {"importlib": importlib, "sys": sys, "subprocess": subprocess, "os": __import__("os"), "CLOUD": "colab"}
     if not install or conflict:
         with pytest.raises(RuntimeError, match="Review missing packages" if not install else "pip check found conflicts"):
             exec(compile(tree, str(NOTEBOOK), "exec"), namespace)
@@ -132,6 +132,80 @@ def test_dependency_setup_installs_only_missing_tracking_and_surfaces_conflicts(
         assert commands == []
     if conflict:
         assert "fixture package conflict" in capsys.readouterr().out
+
+
+KAGGLE_CONFLICTS = "\n".join([
+    "bigframes 2.48.0 requires google-cloud-bigquery-storage, which is not installed.",
+    "google-colab 1.0.0 has requirement jupyter-server==2.20.0, but you have jupyter-server 2.12.5.",
+    "google-colab 1.0.0 has requirement pandas==2.2.3, but you have pandas 2.3.3.",
+    "google-colab 1.0.0 has requirement requests==2.32.4, but you have requests 2.34.2.",
+    "dopamine-rl 4.1.2 has requirement gym<=0.25.2, but you have gym 0.26.2.",
+    "gradio 6.26.0 has requirement pillow<13, but you have pillow 13.0.0.",
+    "moviepy 1.0.3 has requirement decorator<5, but you have decorator 5.3.1.",
+])
+
+
+@pytest.mark.parametrize("cloud,stdout,stderr,code,allowed", [
+    ("kaggle", KAGGLE_CONFLICTS, "", 1, True),
+    ("colab", KAGGLE_CONFLICTS, "", 1, False),
+    ("kaggle", KAGGLE_CONFLICTS + "\ndatasets 5.1.0 has requirement numpy<2, but you have numpy 2.5.4.", "", 1, False),
+    ("kaggle", KAGGLE_CONFLICTS + "\nunknown 1.0 requires missing-package, which is not installed.", "", 1, False),
+    ("kaggle", "gradio 6.26.0 has requirement numpy<2, but you have numpy 2.5.4.", "", 1, False),
+    ("kaggle", "bigframes broken output", "", 1, False),
+    ("kaggle", "", "", 1, False),
+    ("kaggle", KAGGLE_CONFLICTS, "pip process warning", 1, False),
+    ("kaggle", KAGGLE_CONFLICTS, "", 2, False),
+    ("kaggle", "No broken requirements found.", "pip process warning", 0, False),
+])
+def test_dependency_check_only_warns_for_reviewed_kaggle_pairs(monkeypatch, capsys, cloud, stdout, stderr, code, allowed):
+    import importlib.metadata
+    import importlib.util
+    import os
+    import sys
+
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, code, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    namespace = {"importlib": importlib, "os": os, "sys": sys, "subprocess": subprocess, "CLOUD": cloud}
+    if allowed:
+        _execute("training-dependencies", namespace)
+        assert callable(namespace["validate_preflight_preparation"])
+    else:
+        with pytest.raises(RuntimeError, match="pip check"):
+            _execute("training-dependencies", namespace)
+    assert commands == [[sys.executable, "-m", "pip", "check"]]
+    output = capsys.readouterr().out
+    assert stdout in output and stderr in output
+    if allowed:
+        assert "WARNING" in output and "Kaggle" in output
+
+
+def test_kaggle_warning_does_not_hide_required_import_failure(monkeypatch):
+    import importlib.metadata
+    import importlib.util
+    import os
+    import sys
+
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, 1, stdout=KAGGLE_CONFLICTS, stderr=""))
+    original_import = importlib.import_module
+
+    def import_module(name):
+        if name == "mlflow":
+            assert os.environ["MLFLOW_DISABLE_TELEMETRY"] == "true"
+            assert os.environ["MLFLOW_DISABLE_AGENT_HINT"] == "1"
+            assert os.environ["MLFLOW_ALLOW_FILE_STORE"] == "true"
+            raise ImportError("fixture: installed MLflow is broken")
+        return original_import(name)
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+    with pytest.raises(ImportError, match="installed MLflow is broken"):
+        _execute("training-dependencies", {"importlib": importlib, "os": os, "sys": sys,
+                                            "subprocess": subprocess, "CLOUD": "kaggle"})
 
 
 @pytest.mark.parametrize("cloud,root", [("colab", "/content/drive/MyDrive/featherlens/experiments"),

@@ -323,7 +323,11 @@ online Colab GPU runtime. Set the full published training PR SHA; use a fresh
 kernel and the verified canonical metadata ZIP. Setup verifies exact clean Git
 HEAD before project imports, preserves CUDA packages and global source/weight
 caches, installs only missing non-Torch dependencies and prints `pip check`
-conflicts. Metadata validation requires manifest SHA-256
+conflicts. On Kaggle only, seven reviewed unrelated image-package relationships
+(BigFrames, Colab, Dopamine, Gradio and MoviePy owners) produce visible warnings
+without package repairs. Unknown relationships, malformed/process errors and
+failed required training imports remain fatal; Colab keeps strict checking.
+Metadata validation requires manifest SHA-256
 `a8bd05e048febf32df6d84a6e1bc16eddf6416be723e12dfc89621044962736b` before pixel access.
 Only the pinned official-training source supplies train/validation images.
 
