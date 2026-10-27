@@ -421,3 +421,33 @@ to `--checkpoint`. The prediction code uses the checkpoint's embedded metadata,
 so saved absolute training paths do not need to exist. Trained weights remain
 under ignored `outputs/` locally and must be distributed separately, for example
 through the project's Google Drive delivery.
+
+## Grad-CAM explanations
+
+Grad-CAM uses gradients of a selected **logit** with respect to the last
+ResNet block (`encoder.layer4.2`). It averages the gradients spatially, weights
+the feature channels, applies ReLU, and resizes the map to the input canvas.
+This follows [Selvaraju et al.](https://arxiv.org/abs/1610.02391). The input copy
+requires gradients even though the loaded model's parameters remain frozen.
+No optimizer, weight update or confidence recalibration is involved.
+
+```powershell
+.\.venv\Scripts\python.exe -m src.visualization.resnet50_gradcam --image "D:\birds\bird.jpg" --checkpoint "outputs/resnet50_inaturalist/augmented_pca_search/accuracy_challenger/model.pt" --output "outputs/gradcam/bird.png" --device cpu
+```
+
+The command creates a PNG showing the actual preprocessed input, Grad-CAM map
+and overlay, plus adjacent JSON identifying the prediction, explained class,
+preprocessing and target layer. It refuses to overwrite either file. GPU use is
+available with `--device cuda`. The default explains the predicted species;
+`--class-id N` explains a different saved zero-based class ID. Add
+`--true-class-id N` only when the label is known, to mark the result as correct
+or incorrect. The supplied label does not change the prediction or explanation
+target. Without a known label the command cannot judge correctness.
+
+For the report, include examples of both correct and incorrect predictions and
+discuss whether the highlighted regions lie on the bird, background or padding.
+Keep maps aligned with the full fit-and-pad input rather than stretching them
+onto the uncropped native image. Maps are normalized independently to [0,1];
+their intensities cannot be compared quantitatively across images or classes.
+A zero map indicates no positive spatial contrast. Grad-CAM is coarse positive
+class support, not a bird segmentation, attention layer, or proof of causality.
