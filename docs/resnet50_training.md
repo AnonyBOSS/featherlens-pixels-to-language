@@ -385,3 +385,39 @@ method and its existing commands are supported. The discriminant command require
 The mathematical classifier and covariance-regularization rationale follow the
 [official discriminant-analysis documentation](https://scikit-learn.org/stable/modules/lda_qda.html).
 The implementation here uses PyTorch and needs no new fitting dependency.
+
+## Selected 320px model: single-image prediction
+
+The selected model is iNaturalist2021 ResNet-50 with a shrinkage-discriminant
+classifier refit (shrinkage 0.05), using original and horizontally flipped
+training views. It does not use L2-SP, weight averaging or attention. Measured
+accuracy is 98.06% train, 87.92% validation and 87.54% official test; test macro
+precision/recall/F1 are 88.29%/87.65%/87.62%. Overfitting remains. These are
+single-seed results with reused validation and previously inspected test scores.
+
+Run from the repository root, replacing the image path with your own file:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.resnet50_predict --image "D:\birds\bird.jpg" --checkpoint "outputs/resnet50_inaturalist/augmented_pca_search/accuracy_challenger/model.pt" --device cpu --top-k 5
+```
+
+Use `--device cuda` for GPU prediction. Optionally add `--output prediction.json`
+to save the result; the destination directory must exist, and existing files
+are never overwritten. The JSON lists zero-based class IDs, saved species names
+and softmax scores in descending order. A score is a model confidence, not a
+guarantee that the species identification is correct. The model always ranks
+its known CUB classes; it has no unknown-species detector.
+
+Prediction reads configuration and the ordered class mapping embedded in the
+checkpoint. It reuses EXIF correction, RGB/white-alpha conversion and the saved
+320px full-image fit-and-pad preprocessing, without random augmentation or
+test-time augmentation. The saved classifier already includes the refit and
+confidence scaling; neither is fitted again. No dataset, preparation folder,
+original pretraining checkpoint, MLflow service or internet access is needed.
+
+For another computer, copy/download this selected `model.pt`; keep its adjacent
+`config.json` for inspection and provenance. Pass the new checkpoint location
+to `--checkpoint`. The prediction code uses the checkpoint's embedded metadata,
+so saved absolute training paths do not need to exist. Trained weights remain
+under ignored `outputs/` locally and must be distributed separately, for example
+through the project's Google Drive delivery.
