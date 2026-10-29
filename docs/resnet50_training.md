@@ -38,6 +38,7 @@ scores were previously inspected. The test is not an untouched final assessment.
 | `src/training/resnet50_experiment.py` | Coordinate stages and epochs, early stopping, best checkpoints and MLflow. |
 | `src/training/resnet50_runner.py` | Read command arguments/configuration, seed randomness, select device and build data/model before starting the experiment. |
 | `src/training/resnet50_head_refit.py` | Optional post-training classifier fitting; the selected model uses its LDA path and training-only original/flip features. |
+| `src/training/resnet50_search.py` | Equal-budget grid/random comparison on one fixed feature cache; logs trials, classifier coefficients, metrics and timing. |
 | `src/evaluation/resnet50_evaluation.py` | Evaluate a fixed checkpoint on the full official test set and save metrics/confusion matrix. |
 | `src/resnet50_predict.py` | Load a checkpoint and predict species for one local image. |
 | `src/visualization/resnet50_gradcam.py` | Explain a class logit with a heatmap without updating model weights. |
@@ -189,11 +190,46 @@ search spaces, trial budgets, best validation accuracy/macro F1 and elapsed time
 Compare like-for-like tasks/budgets, or explicitly explain any differences; do
 not rank methods from test scores.
 
-Existing local records include a 64-combination feature/refit grid and a
-16-trial random shrinkage search. They differ in search spaces and budgets, so
-they do not yet support an unqualified claim that one search is better. Their
-reproducible comparison remains a separate deliverable. A frozen-feature head
-comparison need not repeat full encoder training.
+The controlled comparison is `src.training.resnet50_search`. It tunes only LDA
+shrinkage, with 8 trials per method by default, the same bounds [0.03,0.95], the
+same log scale, the same frozen features and two CPU threads. Grid points are
+equally spaced on the log scale; random points are log-uniform with seed42.
+Candidate lists are saved before fitting. Trial order alternates between methods
+to reduce ordering bias; a small data-independent linear-algebra warmup is shared.
+
+```powershell
+.\.venv\Scripts\python.exe -m src.training.resnet50_search --features outputs/resnet50_inaturalist/resolution_review/finetuned_features.pt --source-checkpoint outputs/resnet50_inaturalist/training/9c6e5c07be24414b95fc5717e3d01eeb/best.pt --output-dir outputs/resnet50_inaturalist/grid_random_comparison --trials 8 --seed 42
+```
+
+The output directory must be new. For a rerun, choose a different `--output-dir`.
+The input cache was produced from deterministic 320px original-view images; its
+source checkpoint, canonical IDs and labels are verified before fitting. This
+study uses original training features only, rather than the original-plus-flip
+recipe of the selected deployment model. Both methods use exactly the same
+inputs. Encoder features are already computed, so this command does not load
+images, download weights or train the encoder. The existing cache and its producer
+records must travel with the comparison if running it on another computer.
+
+Calibration is disabled because the goal is comparing class predictions, not
+confidence fitting. Each trial reuses `fit_discriminant_head`; feature statistics
+use training data only. Best trials are chosen by validation accuracy, then
+macro F1, then earlier trial. No test data is evaluated and no deployment model
+is replaced. More than one metric is reported, without searching on test scores.
+
+Outputs are `plan.json`, `trials.csv`, `summary.json`, `comparison.png`, and one
+small coefficient checkpoint per trial under `heads/`. Coefficients reference the
+fixed source encoder and feature-cache hashes; they are not standalone deployment
+checkpoints. MLflow records a parent comparison and a nested run for each trial,
+including parameters, metrics, coefficient artifacts and the comparison plot.
+
+Timing sums fitting and scoring for each method, excluding shared feature
+loading/extraction, logging, plotting and checkpoint I/O. It is machine-dependent;
+one encoder, one hyperparameter and one random seed do not establish a universal
+winner. Read the measured table in [search comparison](resnet50_search_comparison.md).
+
+Older exploratory records contain a 64-combination feature/refit grid and a
+16-trial random shrinkage search with different spaces/budgets. They remain
+experiment history and should not be mixed into this controlled comparison.
 
 ## Delivery and later encoder reuse
 

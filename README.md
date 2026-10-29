@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** The source/data foundation, integrity audit, classification pipeline and statistical EDA are implemented. The selected iNaturalist2021 ResNet-50 uses a 320px classifier refit and reached **87.92% validation and 87.54% test accuracy**. Training, MLflow tracking, evaluation, single-image prediction and Grad-CAM are implemented. The tuning-method comparison, scratch-CNN/benchmark comparisons and final delivery remain. The separate ConvNeXt-Tiny, EfficientNet-B3 and RegNetY-3.2GF pipeline provides verified GPU preflight, completed-epoch recovery and a cloud acceptance notebook; genuine canonical cloud-training results for that pipeline remain pending. See the [selected ResNet-50 workflow](docs/resnet50_training.md), [measured results](docs/resnet50_test_results.md) and [shared pretrained training guide](docs/pretrained_cnn_foundation.md).
+> **Development status:** The source/data foundation, integrity audit, classification pipeline and statistical EDA are implemented. The selected iNaturalist2021 ResNet-50 uses a 320px classifier refit and reached **87.92% validation and 87.54% test accuracy**. Training, MLflow tracking, evaluation, single-image prediction and Grad-CAM are implemented. A controlled equal-budget grid/random classifier-search comparison is complete; scratch-CNN/benchmark comparisons and final delivery remain. The separate ConvNeXt-Tiny, EfficientNet-B3 and RegNetY-3.2GF pipeline provides verified GPU preflight, completed-epoch recovery and a cloud acceptance notebook; genuine canonical cloud-training results for that pipeline remain pending. See the [selected ResNet-50 workflow](docs/resnet50_training.md), [search comparison](docs/resnet50_search_comparison.md), [measured results](docs/resnet50_test_results.md) and [shared pretrained training guide](docs/pretrained_cnn_foundation.md).
 
 ## Overview
 
@@ -308,7 +308,7 @@ training commands remain planned.
 - [x] **Pretrained CNN foundation:** Three model adapters, 200-class heads, encoder features, fine-tuning policies, and prepared train/validation integration; verified on CPU without pretrained weights
 - [ ] **Classification:** CNN baseline trained from scratch, transfer learning, and model comparison
 - [x] **ResNet-50 transfer workflow:** Staged training, classifier refit, MLflow, evaluation, prediction and Grad-CAM
-- [ ] **Tuning comparison:** Reproducible grid-versus-random comparison with scores, budgets and timing
+- [x] **Tuning comparison:** Equal-budget grid/random classifier search with metrics, trial records, timing and MLflow; see [results](docs/resnet50_search_comparison.md)
 - [ ] **Colorization:** Grayscale-to-color encoderâ€“decoder model
 - [ ] **Captioning:** Image-conditioned autoregressive caption generation
 - [ ] **Evaluation and delivery:** Benchmarks, reproducible CLI workflows, documentation, and demonstration
