@@ -194,7 +194,19 @@ def train_classification(
     criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
     optimizer = build_optimizer(model, config)
     total_steps = config.epochs * len(loaders["train"])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    warmup_steps = max(1, total_steps // 10) if total_steps >= 10 else 0
+    if warmup_steps > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=config.learning_rate * 0.01
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, total_steps))
     use_amp = config.amp and resolved.type == "cuda"
     scaler = torch.amp.GradScaler(resolved.type, enabled=use_amp)
 
@@ -216,6 +228,8 @@ def train_classification(
                 logits = model(images)
                 loss = criterion(logits, targets)
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()

@@ -41,13 +41,14 @@ def _build_loaders_from_config(config: dict[str, Any]) -> tuple[dict[str, Any], 
     prepared_dir = Path(data_cfg.get("prepared_dir", "outputs/classification-v1"))
     manifest = load_classification_manifest(prepared_dir)
     source = load_cub_split("train")
+    strong_augment = bool(data_cfg.get("strong_augment", True))
 
     datasets = {
         "train": CubClassificationDataset(
             source,
             manifest,
             partition="train",
-            transform=classification_transform(training=True),
+            transform=classification_transform(training=True, strong_augment=strong_augment),
         ),
         "val": CubClassificationDataset(
             source,
