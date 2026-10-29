@@ -2,7 +2,7 @@
 task: classification
 
 data:
-  prepared_dir: "outputs/classification-v1"
+  prepared_dir: "outputs/preparation"
   batch_size: 32
   num_workers: 0
   seed: 42
