@@ -21,16 +21,24 @@ import torch
 from src.evaluation.metrics import confusion_matrix, summarize_classification
 
 
+OPTIMIZERS = ("adam", "sgd", "adagrad")
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
-    """Validated immutable optimization settings for one training run."""
+    """Validated immutable optimization settings for one training run.
+
+    ``optimizer`` picks Adam (the default), SGD with momentum 0.9, or Adagrad.
+    All three apply ``weight_decay`` as a classic L2 penalty, so keep it small.
+    """
 
     epochs: int = 20
     learning_rate: float = 3e-4
-    weight_decay: float = 0.05
+    weight_decay: float = 1e-4
     label_smoothing: float = 0.1
     seed: int = 42
     amp: bool = True
+    optimizer: str = "adam"
 
     def __post_init__(self) -> None:
         if type(self.epochs) is not int or isinstance(self.epochs, bool) or self.epochs < 1:
@@ -48,6 +56,18 @@ class TrainingConfig:
             raise ValueError("seed must be an integer in [0, 2**32)")
         if type(self.amp) is not bool:
             raise ValueError("amp must be a bool")
+        if self.optimizer not in OPTIMIZERS:
+            raise ValueError(f"optimizer must be one of {OPTIMIZERS}")
+
+
+def build_optimizer(model: nn.Module, config: TrainingConfig) -> torch.optim.Optimizer:
+    """Create the optimizer named by ``config.optimizer`` over every parameter."""
+    params, lr, wd = model.parameters(), config.learning_rate, config.weight_decay
+    if config.optimizer == "sgd":
+        return torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd)
+    if config.optimizer == "adagrad":
+        return torch.optim.Adagrad(params, lr=lr, weight_decay=wd)
+    return torch.optim.Adam(params, lr=lr, weight_decay=wd)
 
 
 @dataclass(frozen=True)
@@ -172,9 +192,7 @@ def train_classification(
     resolved = _resolve_device(device)
     model.to(resolved)
     criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay,
-    )
+    optimizer = build_optimizer(model, config)
     total_steps = config.epochs * len(loaders["train"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
     use_amp = config.amp and resolved.type == "cuda"
@@ -236,3 +254,14 @@ def train_classification(
         best_val_accuracy=best_accuracy,
         best_state=best_state,
     )
+
+
+__all__ = [
+    "OPTIMIZERS",
+    "TrainingConfig",
+    "build_optimizer",
+    "EpochReport",
+    "TrainingResult",
+    "evaluate_classification",
+    "train_classification",
+]

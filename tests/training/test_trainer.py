@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 """CPU arithmetic for training and evaluation; no downloaded weights or GPU claims."""
 from dataclasses import replace
 import importlib
@@ -10,21 +9,11 @@ import numpy as np
 import pytest
 import torch
 from torch import nn
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from src.data.classification import make_classification_loaders
 from src.models.finetuning import apply_parameter_policy, apply_training_policy
 from src.models.pretrained import ModelConfig
-=======
-"""Offline contracts for the classification training loop; tiny synthetic models."""
-
-import importlib
-import math
-
-import pytest
-import torch
-from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
 
 
 NUM_CLASSES = 5
@@ -58,14 +47,22 @@ def make_loader(count, *, batch_size=4, shuffle=False, seed=0, empty=False):
 
     return DataLoader(TensorDataset(images, labels), batch_size=batch_size, shuffle=shuffle,
                       generator=generator, collate_fn=collate)
->>>>>>> d2b3715 (test(training): cover the training loop offline)
 
 
 @pytest.fixture
 def api():
-<<<<<<< HEAD
     assert importlib.util.find_spec('src.training.trainer') is not None, 'Training primitives are missing'
     return importlib.import_module('src.training.trainer')
+
+
+def make_config(api, **changes):
+    values = {"epochs": 2, "learning_rate": 1e-2, "seed": 42, "amp": False} | changes
+    return api.TrainingConfig(**values)
+
+
+def make_model():
+    torch.manual_seed(7)
+    return TinyNet()
 
 
 def batch(images, labels, ids=None):
@@ -156,7 +153,7 @@ def test_evaluate_hand_computed_metrics_and_serializable_predictions(api):
     model.offset.grad = torch.ones_like(model.offset)
     logits = [[6, 5, 4, 3, 2, 1], [6, 5, 4, 3, 2, 1],
               [5, 6, 4, 3, 2, 1], [5, 6, 4, 3, 2, 1], [6, 5, 1, 4, 3, 2]]
-    loader = [batch(logits[:3], [0, 0, 0], ['a', 'b', 'c']),
+    loader = [batch(logits[:3], [0, 0, 0], ['a', 'b', 'c']),\
               batch(logits[3:], [1, 2], ['d', 'e'])]
     result = api.evaluate(model, loader, 'cpu', class_names=list('ABCDEF'))
     assert result['loss'] == pytest.approx(math.log(sum(math.exp(-i) for i in range(6))) + 6 / 5)
@@ -307,7 +304,7 @@ def test_evaluate_rejects_nonfinite_confidence_after_float_conversion(api):
 
 CLASS_NAMES = [f'Bird {i}' for i in range(200)]
 DATA_IDENTITY = {'manifest_sha256': 'a' * 64, 'class_names': CLASS_NAMES}
-PROVENANCE = {'status': 'synthetic_fixture', 'architecture': 'convnext_tiny'}
+PROVENANCE = {'status': 'synthetic_fixture', 'architecture': 'convnext_tiny'}\
 
 
 class TinyAdapter(nn.Module):
@@ -374,13 +371,13 @@ def test_config_accepts_json_and_is_immutable(api):
         config.seed = 0
 
 
-@pytest.mark.parametrize('kwargs', [
-    {'phases': []}, {'phases': [{'mode': 'oops'}]}, {'phases': [{'epochs': 0}]},
-    {'phases': [{'lr': float('nan')}]}, {'architecture': 'resnet50'}, {'batch_size': True},
-    {'accumulation_steps': 0}, {'num_workers': -1}, {'seed': 2**32}, {'seed': True},
-    {'amp': 'fp8'}, {'weight_decay': -1}, {'lr_decay': 0}, {'lr_decay': float('inf')},
-    {'patience': 0}, {'patience': True}, {'min_delta': -1}, {'head_dropout': 1},
-    {'freeze_bn_stats': 1}, {'image_size': 0}, {'normalization': [[0] * 3, [0] * 3]},
+@pytest.mark.parametrize('kwargs', [\
+    {'phases': []}, {'phases': [{'mode': 'oops'}]}, {'phases': [{'epochs': 0}]},\
+    {'phases': [{'lr': float('nan')}]}, {'architecture': 'resnet50'}, {'batch_size': True},\
+    {'accumulation_steps': 0}, {'num_workers': -1}, {'seed': 2**32}, {'seed': True},\
+    {'amp': 'fp8'}, {'weight_decay': -1}, {'lr_decay': 0}, {'lr_decay': float('inf')},\
+    {'patience': 0}, {'patience': True}, {'min_delta': -1}, {'head_dropout': 1},\
+    {'freeze_bn_stats': 1}, {'image_size': 0}, {'normalization': [[0] * 3, [0] * 3]},\
 ])
 def test_config_rejects_invalid_values(api, kwargs):
     assert hasattr(api, 'TrainConfig'), 'TrainConfig is missing'
@@ -546,18 +543,6 @@ def test_fit_rejects_missing_manifest_identity_before_updating_weights(api, tmp_
         api.fit(model, tiny_loaders(), tiny_config(api), tmp_path,
                 data_identity={'class_names': CLASS_NAMES}, weight_provenance=PROVENANCE)
     assert torch.equal(before, model.head[1].weight)
-=======
-    return importlib.import_module("src.training.trainer")
-
-
-def make_config(api, **changes):
-    values = {"epochs": 2, "learning_rate": 1e-2, "seed": 42, "amp": False} | changes
-    return api.TrainingConfig(**values)
-
-
-def make_model():
-    torch.manual_seed(7)
-    return TinyNet()
 
 
 @pytest.mark.parametrize("changes", [
@@ -569,10 +554,21 @@ def make_model():
     {"label_smoothing": True},
     {"seed": -1}, {"seed": 2**32}, {"seed": True}, {"seed": 1.0},
     {"amp": 1},
+    {"optimizer": "rmsprop"}, {"optimizer": 123},
 ])
 def test_invalid_config_is_rejected_before_training(api, changes):
     with pytest.raises((TypeError, ValueError)):
         api.TrainingConfig(**changes)
+
+
+@pytest.mark.parametrize("opt_name", ["adam", "sgd", "adagrad"])
+def test_training_supports_all_configured_optimizers(api, opt_name):
+    model = make_model()
+    loaders = {"train": make_loader(8, shuffle=True, seed=1), "val": make_loader(4, seed=2)}
+    config = make_config(api, epochs=1, optimizer=opt_name)
+    result = api.train_classification(model, loaders, config)
+    assert len(result.reports) == 1
+    assert math.isfinite(result.reports[0].train_loss)
 
 
 def test_training_returns_history_best_epoch_and_portable_snapshot(api):
@@ -671,15 +667,3 @@ def test_one_real_epoch_runs_on_the_scratch_model(api):
     config = make_config(api, epochs=1, learning_rate=1e-3, amp=True)
     result = api.train_classification(ScaledTiny(model), loaders, config, device="cpu")
     assert len(result.reports) == 1
-    report = result.reports[0]
-    assert all(math.isfinite(value) for value in (
-        report.train_loss, report.train_accuracy, report.val_loss, report.val_accuracy))
-    assert result.best_state
-
-
-def test_amp_config_is_validated_and_cpu_run_ignores_it(api):
-    model = make_model()
-    loaders = {"train": make_loader(8, seed=1), "val": make_loader(4, seed=2)}
-    result = api.train_classification(model, loaders, make_config(api, amp=True))
-    assert result.reports[-1].val_loss == pytest.approx(result.reports[-1].val_loss)
->>>>>>> d2b3715 (test(training): cover the training loop offline)

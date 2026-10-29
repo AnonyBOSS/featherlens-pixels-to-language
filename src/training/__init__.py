@@ -2,9 +2,11 @@
 
 # Scratch model training
 from .scratch_trainer import (
+    OPTIMIZERS,
     EpochReport,
     TrainingConfig,
     TrainingResult,
+    build_optimizer,
     evaluate_classification,
     train_classification,
 )
@@ -19,9 +21,11 @@ from .pretrained_trainer import (
 )
 
 __all__ = [
+    "OPTIMIZERS",
     "EpochReport",
     "TrainingConfig",
     "TrainingResult",
+    "build_optimizer",
     "evaluate_classification",
     "train_classification",
     "Phase",

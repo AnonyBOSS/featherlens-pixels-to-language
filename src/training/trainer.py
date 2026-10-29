@@ -23,9 +23,11 @@ from src.training.pretrained_trainer import (
     TrainConfig,
 )
 from src.training.scratch_trainer import (
+    OPTIMIZERS,
     EpochReport,
     TrainingConfig,
     TrainingResult,
+    build_optimizer,
     evaluate_classification,
     train_classification,
 )
@@ -361,15 +363,17 @@ def fit(model, loaders, config, run_dir, *, data_identity, weight_provenance,
 
 
 __all__ = [
+    "OPTIMIZERS",
     "Phase",
     "TrainConfig",
+    "TrainingConfig",
+    "EpochReport",
+    "TrainingResult",
+    "build_optimizer",
     "resolve_precision",
     "train_epoch",
     "evaluate",
     "fit",
-    "EpochReport",
-    "TrainingConfig",
-    "TrainingResult",
     "evaluate_classification",
     "train_classification",
 ]
