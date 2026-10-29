@@ -1,4 +1,4 @@
-"""Visualization modules for EDA, training curves, and Grad-CAM."""
+"""Visualization modules for EDA, training curves, confusion matrices, and Grad-CAM."""
 
 from .gradcam import (
     GradCAM,
@@ -7,6 +7,11 @@ from .gradcam import (
     denormalize_image,
     plot_gradcam_grid,
 )
+from .training_plots import (
+    plot_confusion_summary,
+    plot_training_curves,
+    plot_tuning_comparison,
+)
 
 __all__ = [
     "GradCAM",
@@ -14,4 +19,7 @@ __all__ = [
     "collect_gradcam_samples",
     "denormalize_image",
     "plot_gradcam_grid",
+    "plot_confusion_summary",
+    "plot_training_curves",
+    "plot_tuning_comparison",
 ]
