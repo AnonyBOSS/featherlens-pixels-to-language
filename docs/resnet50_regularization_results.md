@@ -1,5 +1,7 @@
 # ResNet-50 regularization results
 
+These are earlier ImageNet regularization experiments. The [selected workflow](resnet50_training.md) documents the current iNaturalist model.
+
 These are exploratory validation results from one seed (42), using the original
 4,794 training and 1,200 validation images. No official test images were used.
 
@@ -51,7 +53,7 @@ The lower-LR trial reached its cap without triggering early stopping.
 
 - Baseline: [resnet50.yaml](../configs/resnet50.yaml).
 - Selected: [resnet50_regularized.yaml](../configs/resnet50_regularized.yaml).
-- Lower LR: [resnet50_regularized_slow.yaml](../configs/resnet50_regularized_slow.yaml).
+- Lower LR: [archived configuration below](#archived-lower-learning-rate-configuration).
 
 - Baseline run ID: acf1269e5a9a40d09ef80915fc34e7a9.
 - Regularized run ID: 487597dac3854f30a101214619872d38.
@@ -73,3 +75,48 @@ and plots remain ignored by Git; upload required trained models to Drive manuall
 These two manually chosen trials do not satisfy the project requirement to
 compare grid and random search. Broader tuning, repeated seeds, Grad-CAM,
 scratch-CNN/benchmark comparisons, and final held-out test evaluation remain.
+
+## Archived lower-learning-rate configuration
+
+This historical experiment is not part of the selected iNaturalist workflow.
+Its former standalone configuration, `configs/resnet50_regularized_slow.yaml`, is preserved below
+so the measured trial remains documented without an unused active YAML file.
+
+```yaml
+experiment:
+  name: resnet50_regularization
+  seed: 42
+model:
+  num_classes: 200
+  weights: IMAGENET1K_V2
+  dropout: 0.3
+data:
+  prepared_dir: preparation
+  image_size: 224
+  geometry: fit
+  normalization: imagenet
+  augmentation: mild
+  batch_size: 32
+  num_workers: 0
+training:
+  device: cuda
+  optimizer: adamw
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  head:
+    epochs: 3
+    learning_rate: 0.001
+  finetune:
+    epochs: 10
+    encoder_learning_rate: 0.000003
+    classifier_learning_rate: 0.00003
+    early_stopping:
+      patience: 3
+      min_delta: 0.001
+checkpoints:
+  local_root: outputs/resnet50
+  selection_metric: val_accuracy
+tracking:
+  backend: mlflow
+  local_dir: outputs/resnet50/mlruns
+```

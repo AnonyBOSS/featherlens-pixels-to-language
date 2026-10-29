@@ -4,7 +4,7 @@
 
 Built with **PyTorch**, this project explores how visual representations learned for fine-grained image recognition can be reused for image reconstruction and natural-language generation. All three tasks are developed around a common convolutional neural network (CNN) encoder and evaluated on the **CUB-200-2011** bird dataset.
 
-> **Development status:** The source/data foundation, integrity audit, classification pipeline and statistical EDA are implemented. The ResNet-50 workflow supports ImageNet baselines and iNaturalist2021 pretraining, two-stage local training, MLflow tracking, classifier refits and official-test evaluation. Its selected iNaturalist model reached 85.23% test accuracy; a separate balanced candidate remains validation-only. The shared ConvNeXt-Tiny, EfficientNet-B3 and RegNetY-3.2GF pipeline also provides verified GPU preflight, completed-epoch recovery and a cloud acceptance notebook; genuine canonical cloud-training results for that pipeline remain pending. Grad-CAM, random-search comparison, single-image prediction and scratch-CNN comparison remain. See the [ResNet-50 workflow](docs/resnet50_training.md), [measured results](docs/resnet50_test_results.md) and [shared pretrained training guide](docs/pretrained_cnn_foundation.md).
+> **Development status:** The source/data foundation, integrity audit, classification pipeline and statistical EDA are implemented. The selected iNaturalist2021 ResNet-50 uses a 320px classifier refit and reached **87.92% validation and 87.54% test accuracy**. Training, MLflow tracking, evaluation, single-image prediction and Grad-CAM are implemented. The tuning-method comparison, scratch-CNN/benchmark comparisons and final delivery remain. The separate ConvNeXt-Tiny, EfficientNet-B3 and RegNetY-3.2GF pipeline provides verified GPU preflight, completed-epoch recovery and a cloud acceptance notebook; genuine canonical cloud-training results for that pipeline remain pending. See the [selected ResNet-50 workflow](docs/resnet50_training.md), [measured results](docs/resnet50_test_results.md) and [shared pretrained training guide](docs/pretrained_cnn_foundation.md).
 
 ## Overview
 
@@ -135,14 +135,14 @@ The lazy Dataset returns `{"image": tensor, "label": class_id, "image_id": stabl
 
 Use Python 3.12 and [requirements-classification.txt](requirements-classification.txt) for the verified environment. See [the classification handoff](docs/classification_data.md) for installation, eligibility policy, split provenance, model-specific normalization, a Windows-safe batch example, and verification limits. Generated working artifacts under `outputs/`, environments, and caches remain ignored by Git; the reviewed shared `preparation/` snapshot is intended to be versioned.
 
-### ResNet-50 ImageNet and iNaturalist experiments
+### Selected iNaturalist ResNet-50 workflow
 
 The same ResNet-50 implementation supports two distinct pretraining choices:
 `configs/resnet50.yaml` selects the earlier ImageNet baseline, while
 `configs/resnet50_inaturalist.yaml` selects the authors' iNaturalist2021 checkpoint
 trained without ImageNet initialization. Their weights and experiment outputs
-are separate. The default runner configuration remains the ImageNet baseline;
-select the iNaturalist YAML explicitly for the reported iNaturalist results.
+are separate. The default runner configuration is the iNaturalist YAML;
+the historical ImageNet baseline requires its explicit configuration.
 
 After installing a suitable CUDA PyTorch build, install the workflow dependencies
 and run from the repository root:
@@ -156,12 +156,23 @@ and run from the repository root:
 The iNaturalist pretraining file is an external input, verified against the
 SHA-256 pinned in the configuration; its download instructions are in the
 [training guide](docs/resnet50_training.md#inaturalist2021-pretraining-without-imagenet-initialization).
-Training prints each unique output directory. The recommended complete export
-uses the fine-tuned encoder and a regularized linear discriminant head, with
-86.67% validation and 85.23% official test accuracy. The stronger-regularization
-alternative has 85.75% validation accuracy and has not been tested. See the
-[selection and metrics](docs/resnet50_test_results.md) for exact model paths,
-reproduction commands, confidence calibration and remaining limitations.
+Training prints each unique output directory. The encoder was trained at 224px;
+the selected final classifier was refitted at 320px using original and flipped
+training views, with discriminant shrinkage 0.05. It reached **87.92% validation
+and 87.54% test accuracy**; test macro precision/recall/F1 are
+**88.29%/87.65%/87.62%**. Overfitting remains, and validation/test were inspected
+across earlier experiments. See [selection and metrics](docs/resnet50_test_results.md)
+and the [workflow/code map](docs/resnet50_training.md).
+
+Prediction and explanation use the saved full checkpoint without retraining:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.resnet50_predict --image "D:\birds\bird.jpg" --checkpoint "outputs/resnet50_inaturalist/augmented_pca_search/accuracy_challenger/model.pt" --device cpu --top-k 5
+.\.venv\Scripts\python.exe -m src.visualization.resnet50_gradcam --image "D:\birds\bird.jpg" --checkpoint "outputs/resnet50_inaturalist/augmented_pca_search/accuracy_challenger/model.pt" --output "outputs/gradcam/bird.png" --device cpu
+```
+
+Replace the image path with your file. Grad-CAM saves a PNG and adjacent JSON;
+add `--true-class-id N` only when the correct zero-based class label is known.
 
 Model files, reports and local MLflow records are ignored by Git and delivered
 separately. Keep model configuration and class mapping with Google Drive exports.
@@ -287,14 +298,17 @@ python -m src.cli train --task classification --config configs/pretrained_accept
 ```
 
 Local MLflow tracking is the default; `--tracking json` explicitly selects portable
-reports only. Prediction, colorization and caption training commands remain planned.
+reports only. This shared JSON CLI currently supports training. ResNet-50 uses
+the separate prediction and Grad-CAM commands above; colorization and caption
+training commands remain planned.
 
 ## Development roadmap
 
 - [x] **Data foundation:** Statistical EDA, source-preserving caption preparation, integrity audit, reproducible splits, transforms, and classification augmentation
 - [x] **Pretrained CNN foundation:** Three model adapters, 200-class heads, encoder features, fine-tuning policies, and prepared train/validation integration; verified on CPU without pretrained weights
 - [ ] **Classification:** CNN baseline trained from scratch, transfer learning, and model comparison
-- [ ] **Optimization and explainability:** Grid search, random search, experiment tracking, and Grad-CAM
+- [x] **ResNet-50 transfer workflow:** Staged training, classifier refit, MLflow, evaluation, prediction and Grad-CAM
+- [ ] **Tuning comparison:** Reproducible grid-versus-random comparison with scores, budgets and timing
 - [ ] **Colorization:** Grayscale-to-color encoderâ€“decoder model
 - [ ] **Captioning:** Image-conditioned autoregressive caption generation
 - [ ] **Evaluation and delivery:** Benchmarks, reproducible CLI workflows, documentation, and demonstration

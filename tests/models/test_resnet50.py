@@ -196,3 +196,22 @@ def test_inaturalist_configuration_requires_path_and_hash(tmp_path, field, value
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
     with pytest.raises(ValueError, match=field):
         load_config(path)
+
+
+def test_runner_defaults_to_selected_inaturalist_workflow(monkeypatch):
+    import sys
+    from pathlib import Path
+    import src.training.resnet50_runner as runner
+
+    received = []
+
+    def capture_config(path):
+        received.append(path)
+        raise ValueError("Stop before loading data or weights.")
+
+    monkeypatch.setattr(sys, "argv", ["resnet50_runner", "--check-batch"])
+    monkeypatch.setattr(runner, "load_config", capture_config)
+    with pytest.raises(SystemExit) as error:
+        runner.main()
+    assert error.value.code == 2
+    assert received == [Path("configs/resnet50_inaturalist.yaml")]

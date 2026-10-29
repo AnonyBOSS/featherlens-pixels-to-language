@@ -1,5 +1,7 @@
 # Classification pipeline review after the first official test evaluation
 
+This is an experiment-history and diagnostic record. Start with the [selected workflow](resnet50_training.md) for the current model and commands.
+
 This review uses the 30-page Task 1.1 EDA report, the nine-page project
 specification, the shared source/preparation/image/Dataset/transform code, the
 ResNet model, all training modules/configurations, the classifier refit, the

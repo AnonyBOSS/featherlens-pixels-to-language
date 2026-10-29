@@ -1,5 +1,7 @@
 # ResNet-50 overfitting mitigation: measured trade-offs
 
+This records earlier ImageNet experiments. For the current selected iNaturalist model, use the [selected workflow](resnet50_training.md).
+
 This document records validation tuning before official test evaluation. The
 subsequent fixed-checkpoint results are in [official test results](resnet50_test_results.md).
 
@@ -90,3 +92,97 @@ The transfer-learning workflow follows the
 [PyTorch tutorial](https://docs.pytorch.org/tutorials/beginner/transfer_learning_tutorial.html).
 Mixup blends training examples and their targets as described in the
 [original paper](https://arxiv.org/abs/1710.09412).
+
+## Archived last-block configuration
+
+This historical experiment is not part of the selected iNaturalist workflow.
+Its former standalone configuration, `configs/resnet50_last_block.yaml`, is preserved below
+so the measured trial remains documented without an unused active YAML file.
+
+```yaml
+experiment:
+  name: resnet50_capacity_regularization
+  seed: 42
+model:
+  num_classes: 200
+  weights: IMAGENET1K_V2
+  dropout: 0.3
+  finetune_scope: last_block
+data:
+  prepared_dir: preparation
+  image_size: 224
+  geometry: fit
+  normalization: imagenet
+  augmentation: mild
+  batch_size: 32
+  num_workers: 0
+training:
+  device: cuda
+  optimizer: adamw
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  head:
+    epochs: 3
+    learning_rate: 0.001
+  finetune:
+    epochs: 10
+    encoder_learning_rate: 0.00001
+    classifier_learning_rate: 0.0001
+    early_stopping:
+      patience: 3
+      min_delta: 0.001
+checkpoints:
+  local_root: outputs/resnet50
+  selection_metric: val_accuracy
+tracking:
+  backend: mlflow
+  local_dir: outputs/resnet50/mlruns
+```
+
+## Archived Mixup configuration
+
+This historical experiment is not part of the selected iNaturalist workflow.
+Its former standalone configuration, `configs/resnet50_mixup.yaml`, is preserved below
+so the measured trial remains documented without an unused active YAML file.
+
+```yaml
+experiment:
+  name: resnet50_capacity_regularization
+  seed: 42
+model:
+  num_classes: 200
+  weights: IMAGENET1K_V2
+  dropout: 0.3
+  finetune_scope: layer4
+data:
+  prepared_dir: preparation
+  image_size: 224
+  geometry: fit
+  normalization: imagenet
+  augmentation: mild
+  batch_size: 32
+  num_workers: 0
+training:
+  device: cuda
+  optimizer: adamw
+  weight_decay: 0.01
+  label_smoothing: 0.1
+  head:
+    epochs: 3
+    learning_rate: 0.001
+  finetune:
+    epochs: 10
+    encoder_learning_rate: 0.00001
+    classifier_learning_rate: 0.0001
+    mixup_alpha: 0.2
+    label_smoothing: 0.0
+    early_stopping:
+      patience: 3
+      min_delta: 0.001
+checkpoints:
+  local_root: outputs/resnet50
+  selection_metric: val_accuracy
+tracking:
+  backend: mlflow
+  local_dir: outputs/resnet50/mlruns
+```

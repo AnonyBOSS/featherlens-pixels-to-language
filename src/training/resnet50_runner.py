@@ -286,7 +286,7 @@ def main() -> None:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/resnet50.yaml"),
+        default=Path("configs/resnet50_inaturalist.yaml"),
         help="YAML configuration path; run from the repository root.",
     )
     modes = parser.add_mutually_exclusive_group(required=True)

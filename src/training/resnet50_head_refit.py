@@ -8,6 +8,7 @@ measurement, not an independent test estimate. No test split is loaded here.
 import argparse
 from copy import deepcopy
 from dataclasses import dataclass
+from hashlib import file_digest
 import json
 import math
 import os
@@ -214,13 +215,59 @@ def fit_discriminant_head(
                    classification_metrics(val_logits, val_labels))
 
 
+def fit_flip_augmented_head(
+    train_features: Tensor, train_labels: Tensor,
+    val_features: Tensor, val_labels: Tensor, flipped_features: Tensor, *,
+    num_classes: int, shrinkage: float, calibrate: bool = True,
+) -> HeadFit:
+    """Reproduce the selected two-view discriminant fitting recipe on CPU.
+
+    Flipped features must correspond to the same training rows in the same
+    order. Centering uses both TRAIN views and is folded into the final layer.
+    Float32 centered features match the recorded 320px search's fitting path.
+    Reported train metrics cover original images only, not both fitted views.
+    """
+    _validate_features(train_features, train_labels, val_features, val_labels, num_classes)
+    if (
+        flipped_features.shape != train_features.shape
+        or not flipped_features.is_floating_point()
+        or not torch.isfinite(flipped_features).all().item()
+    ):
+        raise ValueError("flipped_features must match the finite original training features.")
+    train_x, train_y = train_features.detach().cpu().float(), train_labels.detach().cpu()
+    val_x, val_y = val_features.detach().cpu().float(), val_labels.detach().cpu()
+    fit_x = torch.cat((train_x, flipped_features.detach().cpu().float()))
+    fit_y = torch.cat((train_y, train_y))
+    mean = fit_x.double().mean(0)
+    fit = fit_discriminant_head(
+        (fit_x.double() - mean).float(), fit_y,
+        (val_x.double() - mean).float(), val_y,
+        num_classes=num_classes, shrinkage=shrinkage, device=torch.device("cpu"), calibrate=False,
+    )
+    weight, bias = fold_feature_standardization(
+        fit.weight, fit.bias, mean, torch.ones_like(mean),
+    )
+    scale = calibrate_logit_scale(nn.functional.linear(val_x, weight, bias), val_y) if calibrate else 1.0
+    weight, bias = (weight * scale).float(), (bias * scale).float()
+    return HeadFit(
+        weight, bias, scale,
+        classification_metrics(nn.functional.linear(train_x, weight, bias), train_y),
+        classification_metrics(nn.functional.linear(val_x, weight, bias), val_y),
+    )
+
+
 @torch.no_grad()
-def collect_features(model: nn.Module, loader: DataLoader, device: torch.device) -> tuple[Tensor, Tensor]:
+def collect_features(
+    model: nn.Module, loader: DataLoader, device: torch.device, *, horizontal_flip: bool = False,
+) -> tuple[Tensor, Tensor]:
     """Collect deterministic pooled features without updating the encoder."""
     model.eval()
     features, labels = [], []
     for batch in loader:
-        features.append(model.encode(batch["image"].to(device)).cpu())
+        images = batch["image"].to(device)
+        if horizontal_flip:
+            images = torch.flip(images, dims=[-1])
+        features.append(model.encode(images).cpu())
         labels.append(batch["label"].cpu())
     if not labels:
         raise ValueError("Feature loader produced no samples.")
@@ -230,6 +277,8 @@ def collect_features(model: nn.Module, loader: DataLoader, device: torch.device)
 def refit_checkpoint(
     source_path: Path, l2_strength: float | None, device: torch.device, *,
     method: str = "logistic", shrinkage: float | None = None,
+    image_size: int | None = None, batch_size: int | None = None,
+    train_horizontal_flip: bool = False,
 ) -> Path:
     """Create an inference-only checkpoint and a local MLflow refit run."""
     from mlflow.tracking import MlflowClient
@@ -242,6 +291,11 @@ def refit_checkpoint(
 
     if method not in ("logistic", "discriminant"):
         raise ValueError("method must be logistic or discriminant.")
+    for name, value in (("image_size", image_size), ("batch_size", batch_size)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+            raise ValueError(f"{name} must be a positive integer when supplied.")
+    if not isinstance(train_horizontal_flip, bool) or (train_horizontal_flip and method != "discriminant"):
+        raise ValueError("train_horizontal_flip requires discriminant fitting.")
     if method == "discriminant":
         _validate_shrinkage(shrinkage)
         if l2_strength is not None:
@@ -252,8 +306,14 @@ def refit_checkpoint(
         or not math.isfinite(l2_strength) or l2_strength <= 0
     ):
         raise ValueError("Logistic fitting requires positive l2_strength and no shrinkage.")
+    with source_path.open("rb") as stream:
+        source_sha256 = file_digest(stream, "sha256").hexdigest()
     source_checkpoint = torch.load(source_path, map_location="cpu", weights_only=True, mmap=True)
     config = deepcopy(source_checkpoint["config"])
+    if image_size is not None:
+        config["data"]["image_size"] = image_size
+    if batch_size is not None:
+        config["data"]["batch_size"] = batch_size
     if config["data"].get("normalization") != "imagenet":
         raise ValueError("This refit requires saved ImageNet normalization.")
     model = ResNet50Classifier(
@@ -312,10 +372,19 @@ def refit_checkpoint(
                 "feature_statistics_fit_on": "train", "statistics_folded_into_linear": True,
             }
         else:
-            fit = fit_discriminant_head(
-                *features["train"], *features["val"], num_classes=model.classifier.out_features,
-                shrinkage=shrinkage, device=device,
-            )
+            if train_horizontal_flip:
+                flipped, flipped_labels = collect_features(model, loaders["train"], device, horizontal_flip=True)
+                if not torch.equal(flipped_labels, features["train"][1]):
+                    raise ValueError("Flipped training rows must preserve original label order.")
+                fit = fit_flip_augmented_head(
+                    *features["train"], *features["val"], flipped,
+                    num_classes=model.classifier.out_features, shrinkage=shrinkage,
+                )
+            else:
+                fit = fit_discriminant_head(
+                    *features["train"], *features["val"], num_classes=model.classifier.out_features,
+                    shrinkage=shrinkage, device=device,
+                )
             settings = {
                 "method": "shrinkage_linear_discriminant", "shrinkage": shrinkage,
                 "optimizer": "closed_form_solve", "class_priors": "equal",
@@ -331,6 +400,14 @@ def refit_checkpoint(
             **settings,
             "logit_scale": fit.logit_scale, "calibration_fit_on": "val",
             "source_checkpoint": str(source_path.resolve()),
+            "source_sha256": source_sha256,
+            "encoder_training_image_size": source_checkpoint["config"]["data"]["image_size"],
+            "feature_image_size": config["data"]["image_size"],
+            "feature_batch_size": config["data"]["batch_size"],
+            "train_views": "original_plus_horizontal_flip" if train_horizontal_flip else "original",
+            "training_images": len(features["train"][1]),
+            "fit_feature_vectors": len(features["train"][1]) * (2 if train_horizontal_flip else 1),
+            "clean_train_metrics": True, "inference_augmentation": False,
             "source_run_id": (
                 source_checkpoint.get("head_refit", {}).get("run_id")
                 or source_checkpoint.get("config", {}).get("execution", {}).get("run_id")
@@ -346,6 +423,9 @@ def refit_checkpoint(
             "source_epoch": source_checkpoint.get("epoch"),
         }
         destination = folder / "model.pt"
+        with source_path.open("rb") as stream:
+            if file_digest(stream, "sha256").hexdigest() != source_sha256:
+                raise ValueError("Source checkpoint changed during classifier refit.")
         temporary_path = None
         try:
             with tempfile.NamedTemporaryFile(dir=folder, suffix=".tmp", delete=False) as temporary:
@@ -382,12 +462,20 @@ def main() -> None:
     parser.add_argument("--method", choices=("logistic", "discriminant"), default="logistic")
     parser.add_argument("--l2-strength", type=float)
     parser.add_argument("--shrinkage", type=float)
+    parser.add_argument("--image-size", type=int, help="Feature size override; does not retrain the encoder.")
+    parser.add_argument("--batch-size", type=int, help="Feature extraction batch size override.")
+    parser.add_argument("--train-horizontal-flip", action="store_true", help="Discriminant: fit original + flipped TRAIN views.")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     args = parser.parse_args()
     if args.method == "logistic" and (args.l2_strength is None or args.shrinkage is not None):
         parser.error("Logistic fitting requires --l2-strength and no --shrinkage.")
     if args.method == "discriminant" and (args.shrinkage is None or args.l2_strength is not None):
         parser.error("Discriminant fitting requires --shrinkage and no --l2-strength.")
+    if args.train_horizontal_flip and args.method != "discriminant":
+        parser.error("--train-horizontal-flip requires --method discriminant.")
+    for name, value in (("--image-size", args.image_size), ("--batch-size", args.batch_size)):
+        if value is not None and value < 1:
+            parser.error(f"{name} must be a positive integer.")
     if args.device == "cuda" and not torch.cuda.is_available():
         parser.error("CUDA was requested but is unavailable.")
     torch.set_num_threads(2)
@@ -396,6 +484,8 @@ def main() -> None:
     refit_checkpoint(
         args.source_checkpoint, args.l2_strength, torch.device(args.device),
         method=args.method, shrinkage=args.shrinkage,
+        image_size=args.image_size, batch_size=args.batch_size,
+        train_horizontal_flip=args.train_horizontal_flip,
     )
 
 

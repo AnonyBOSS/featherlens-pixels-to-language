@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch.nn import functional as F
 
-from src.training.resnet50_head_refit import fit_discriminant_head
+from src.training.resnet50_head_refit import fit_discriminant_head, fit_flip_augmented_head
 
 
 def example():
@@ -58,3 +58,31 @@ def test_zero_within_class_variation_is_rejected():
     with pytest.raises(ValueError, match="within-class variation"):
         fit_discriminant_head(x, y, x, y, num_classes=2,
                               shrinkage=0.5, device=torch.device("cpu"))
+
+
+def test_two_view_fit_matches_combined_training_statistics_and_clean_metrics():
+    x, y, xv, yv = example()
+    flipped = x + torch.tensor([[0.2, -0.4], [-0.1, 0.3], [0.4, 0.2], [0.1, -0.3], [-0.5, 0.1], [0.3, 0.2]])
+    fit = fit_flip_augmented_head(x, y, xv, yv, flipped, num_classes=3, shrinkage=0.05, calibrate=False)
+    reference = fit_discriminant_head(torch.cat((x, flipped)), torch.cat((y, y)), xv, yv,
+                                     num_classes=3, shrinkage=0.05, device=torch.device("cpu"), calibrate=False)
+    torch.testing.assert_close(fit.weight, reference.weight, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(fit.bias, reference.bias, rtol=1e-5, atol=1e-5)
+    assert fit.train_metrics["samples"] == len(y)  # Never report the two views as independent images.
+    assert fit.val_metrics["samples"] == len(yv)
+    assert fit.train_metrics["accuracy"] == pytest.approx((F.linear(x, fit.weight, fit.bias).argmax(1) == y).double().mean())
+
+
+def test_augmented_statistics_cannot_use_validation_labels_or_features():
+    x, y, xv, yv = example()
+    kwargs = dict(num_classes=3, shrinkage=0.05, calibrate=False)
+    first = fit_flip_augmented_head(x, y, xv, yv, x + 0.1, **kwargs)
+    second = fit_flip_augmented_head(x, y, xv + 100, (yv + 1) % 3, x + 0.1, **kwargs)
+    torch.testing.assert_close(first.weight, second.weight, rtol=0, atol=0)
+    torch.testing.assert_close(first.bias, second.bias, rtol=0, atol=0)
+
+
+def test_augmented_feature_rows_must_match_original_training_shape():
+    x, y, xv, yv = example()
+    with pytest.raises(ValueError, match="flipped_features"):
+        fit_flip_augmented_head(x, y, xv, yv, x[:-1], num_classes=3, shrinkage=0.05)

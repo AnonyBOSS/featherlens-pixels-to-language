@@ -1,5 +1,45 @@
 # Official CUB test evaluation
 
+## Current selected model: 320px iNaturalist ResNet-50
+
+The selected checkpoint uses the CUB-adapted iNaturalist2021 encoder and a
+shrinkage-discriminant classifier (0.05), fitted on original and horizontally
+flipped training features at 320px. The encoder was trained at 224px; refitting
+did not change its weights. Evaluation uses full-image fit-and-pad, one view,
+the original ordered 200 classes and the canonical 4794/1200/5794 splits.
+
+| Split | Accuracy | Macro precision | Macro recall | Macro F1 |
+|---|---:|---:|---:|---:|
+| Train | 98.06% | 98.17% | 98.06% | 98.06% |
+| Validation | 87.92% | 89.61% | 87.92% | 87.91% |
+| Official test | 87.54% | 88.29% | 87.65% | 87.62% |
+
+Selected export:
+`outputs/resnet50_inaturalist/augmented_pca_search/accuracy_challenger/model.pt`.
+Its SHA256 is
+`fcb1e22360fb802da312b9075797d5ada8f8250f975769b1cba3b48211f185c8`.
+The checkpoint embeds its configuration and class mapping. Exact measured
+metrics are in `outputs/resnet50_inaturalist/augmented_pca_search/challenger_evaluation_summary.json`;
+the full test report is
+`outputs/resnet50_inaturalist/evaluation/07dd204f3ae141e89e626500c142b6a6/report.json`.
+This test evaluation used CUDA encoder features and a CPU classifier;
+device/batch differences can affect borderline predictions in another run.
+
+The train-validation gap is 10.14 percentage points. These are one-seed results
+with reused validation and previously inspected test scores, not an untouched
+final benchmark. Later L2-SP/averaging/attention trials remain separate experiment
+records; the user retained this simpler recipe. Additional mirror averaging,
+384/448px refits and a two-model average did not justify replacement under their
+validation rules. Their results are retained in
+`outputs/resnet50_inaturalist/resolution_extension_review/comparison.md` and the
+verified rejected-trial archive. No new test evaluation was run for those rejected
+options. No claim is made that overfitting was eliminated.
+
+Prediction, refitting and Grad-CAM commands are in the
+[selected workflow guide](resnet50_training.md). The sections below are
+**historical results**, including earlier models selected at those times; their
+scores must not be relabelled as results for the current checkpoint.
+
 ## Balanced iNaturalist option: smaller validation gap
 
 The later gap-focused comparison kept validation accuracy within one percentage
