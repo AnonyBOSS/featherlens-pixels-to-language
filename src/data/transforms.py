@@ -31,19 +31,23 @@ class _FitAndPad:
 def classification_transform(
     *, training: bool, image_size: int = 224, geometry: Literal["fit", "crop"] = "fit",
     normalization: tuple[Sequence[float], Sequence[float]] | None = IMAGENET_NORMALIZATION,
+    strong_augment: bool = False,
 ) -> T.Compose:
     """Build train or deterministic evaluation preprocessing.
 
     EXIF-corrected RGB input comes from load_rgb. The default geometry='fit'
     scales the entire image into a centered white square without cropping;
-    aspect ratio is retained within integer pixel rounding. Training adds only
-    a 0.5 horizontal flip. geometry='crop' retains the original shorter-side
+    aspect ratio is retained within integer pixel rounding. Training adds a
+    0.5 horizontal flip (and affine/color/erasing augmentations when
+    ``strong_augment=True``). geometry='crop' retains the original shorter-side
     resize and random(train)/center(eval) crop profile. Output is float32 CHW.
     normalization=None keeps [0,1]; otherwise provide (three means, three stds).
     The ImageNet default is an external constant, never estimated from CUB.
     """
     if not isinstance(training, bool):
         raise ValueError('training must be bool')
+    if not isinstance(strong_augment, bool):
+        raise ValueError('strong_augment must be bool')
     if isinstance(image_size, bool) or not isinstance(image_size, int) or image_size <= 0:
         raise ValueError('image_size must be a positive integer')
     if normalization is not None:
@@ -68,7 +72,20 @@ def classification_transform(
         operations.append(T.RandomCrop(image_size) if training else T.CenterCrop(image_size))
     if training:
         operations.append(T.RandomHorizontalFlip(p=0.5))
+        if strong_augment:
+            operations.extend([
+                T.RandomAffine(
+                    degrees=15,
+                    translate=(0.08, 0.08),
+                    scale=(0.88, 1.12),
+                    interpolation=InterpolationMode.BILINEAR,
+                    fill=(255, 255, 255),
+                ),
+                T.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15),
+            ])
     operations.extend([T.PILToTensor(), T.ConvertImageDtype(torch.float32)])
     if normalization is not None:
         operations.append(T.Normalize(tuple(mean), tuple(std)))
+    if training and strong_augment:
+        operations.append(T.RandomErasing(p=0.2, scale=(0.02, 0.12), value=0.0))
     return T.Compose(operations)
