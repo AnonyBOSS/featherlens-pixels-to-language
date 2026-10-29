@@ -1,4 +1,5 @@
 """Offline CPU contracts; mocks never establish executed cloud/GPU evidence."""
+import contextlib
 import importlib
 import json
 from pathlib import Path
@@ -8,6 +9,12 @@ from zipfile import ZipFile
 import pytest
 import torch
 from torch import nn
+
+
+def _warn_if_cpu():
+    if not torch.cuda.is_available():
+        return pytest.warns(UserWarning, match='pin_memory')
+    return contextlib.nullcontext()
 
 
 def api():
@@ -175,7 +182,7 @@ def test_mocked_candidate_failures_preserve_later_coverage(canonical_fixture, tm
             return {'architecture': architecture, 'status': 'failed', 'failures': [{'stage': 'weights', 'type': 'RuntimeError', 'message': 'synthetic failure'}]}
         return {'architecture': architecture, 'status': 'passed', 'failures': []}
     monkeypatch.setattr(runtime, '_run_candidate', candidate)
-    with pytest.warns(UserWarning, match='pin_memory'):
+    with _warn_if_cpu():
         report = runtime.run_gpu_preflight(runtime.PreflightConfig(canonical_fixture, tmp_path / 'mock-only'))
     assert report['status'] == 'failed'
     assert [model['status'] for model in report['models']] == ['failed', 'passed', 'passed']
@@ -202,7 +209,7 @@ def test_diagnostic_subset_and_disabled_amp_cannot_be_full_acceptance(canonical_
     monkeypatch.setattr(runtime, 'collect_runtime', lambda **kw: facts)
     monkeypatch.setattr(runtime, '_load_train_source', lambda **kw: pinned_source)
     monkeypatch.setattr(runtime, '_run_candidate', lambda c, a, b: {'architecture': a, 'status': 'passed', 'failures': []})
-    with pytest.warns(UserWarning, match='pin_memory'):
+    with _warn_if_cpu():
         report = runtime.run_gpu_preflight(runtime.PreflightConfig(canonical_fixture, tmp_path / 'diagnostic', architectures=('convnext_tiny',), amp='off'))
     assert report['status'] == 'passed'
     assert report['acceptance_complete'] is False
