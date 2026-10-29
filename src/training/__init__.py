@@ -10,6 +10,13 @@ from .scratch_trainer import (
     evaluate_classification,
     train_classification,
 )
+from .tuning import (
+    TrialResult,
+    TuningResult,
+    compare_tuning,
+    grid_search,
+    random_search,
+)
 
 # Pretrained model training
 from .pretrained_trainer import (
@@ -28,6 +35,11 @@ __all__ = [
     "build_optimizer",
     "evaluate_classification",
     "train_classification",
+    "TrialResult",
+    "TuningResult",
+    "compare_tuning",
+    "grid_search",
+    "random_search",
     "Phase",
     "TrainConfig",
     "evaluate_pretrained",
