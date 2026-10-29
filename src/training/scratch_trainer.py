@@ -193,20 +193,16 @@ def train_classification(
     model.to(resolved)
     criterion = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
     optimizer = build_optimizer(model, config)
-    total_steps = config.epochs * len(loaders["train"])
-    warmup_steps = max(1, total_steps // 10) if total_steps >= 10 else 0
-    if warmup_steps > 0:
-        warmup = torch.optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps
-        )
-        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=max(1, total_steps - warmup_steps), eta_min=config.learning_rate * 0.01
-        )
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
-        )
-    else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, total_steps))
+    total_steps = max(1, config.epochs * len(loaders["train"]))
+    warmup_steps = total_steps // 10 if total_steps >= 10 else 0
+
+    def _lr_lambda(step: int) -> float:
+        if warmup_steps > 0 and step < warmup_steps:
+            return 0.1 + 0.9 * (step / warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return 0.01 + 0.495 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
     use_amp = config.amp and resolved.type == "cuda"
     scaler = torch.amp.GradScaler(resolved.type, enabled=use_amp)
 
@@ -230,9 +226,11 @@ def train_classification(
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
-            scheduler.step()
+            if not use_amp or scaler.get_scale() >= scale_before:
+                scheduler.step()
             loss_sum += float(loss.detach()) * images.size(0)
             seen += images.size(0)
             epoch_predictions.append(logits.argmax(dim=1).cpu())
