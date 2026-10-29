@@ -40,10 +40,21 @@ def test_spec_and_config_are_serializable_and_frozen(api):
     {"num_classes": 199}, {"num_classes": 200.0}, {"num_classes": True},
     {"head_dropout": -0.1}, {"head_dropout": 1}, {"head_dropout": float("nan")},
     {"head_dropout": True}, {"head_dropout": "0.5"},
+    {"activation": "gelu"}, {"activation": "sigmoid"}, {"activation": 123},
 ])
 def test_invalid_config_fails_before_construction(api, changes):
     with pytest.raises((TypeError, ValueError)):
         api.ScratchConfig(**changes)
+
+
+def test_leaky_relu_activation_config(api):
+    config = api.ScratchConfig(activation="leaky_relu")
+    model = api.create_scratch_model(config)
+    assert isinstance(model.encoder.stem[2], torch.nn.LeakyReLU)
+    assert model.encoder.stem[2].negative_slope == 0.1
+    # Check forward pass
+    out = model(torch.randn(2, 3, 64, 64))
+    assert out.shape == (2, 200)
 
 
 def test_features_and_logits_at_224_use_one_encoder_pass_and_separate_head(model):

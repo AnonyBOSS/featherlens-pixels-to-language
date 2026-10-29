@@ -20,6 +20,15 @@ _ARCHITECTURE = "scratch_resnet"
 _STEM_WIDTH = 32
 _STAGE_WIDTHS = (64, 128, 256, 256)
 _STAGE_BLOCKS = (2, 2, 2, 2)
+_LEAKY_SLOPE = 0.1
+_ACTIVATIONS = {"relu", "leaky_relu"}
+
+
+def _make_activation(name: str) -> nn.Module:
+    """Return a fresh activation layer; both options are plain torch layers."""
+    if name == "leaky_relu":
+        return nn.LeakyReLU(negative_slope=_LEAKY_SLOPE, inplace=True)
+    return nn.ReLU(inplace=True)
 
 
 @dataclass(frozen=True)
@@ -28,6 +37,7 @@ class ScratchConfig:
 
     num_classes: int = 200
     head_dropout: float = 0.0
+    activation: str = "relu"  # "relu" or "leaky_relu"
 
     def __post_init__(self) -> None:
         if type(self.num_classes) is not int or self.num_classes != 200:
@@ -36,6 +46,8 @@ class ScratchConfig:
                 or not math.isfinite(self.head_dropout)
                 or not 0 <= self.head_dropout < 1):
             raise ValueError("head_dropout must be a finite number in [0, 1)")
+        if self.activation not in _ACTIVATIONS:
+            raise ValueError(f"activation must be one of {sorted(_ACTIVATIONS)}")
 
 
 @dataclass(frozen=True)
@@ -64,8 +76,10 @@ def get_scratch_spec() -> ScratchSpec:
     )
 
 
-def _init_conv(conv: nn.Conv2d) -> None:
-    nn.init.kaiming_normal_(conv.weight, mode="fan_out", nonlinearity="relu")
+def _init_conv(conv: nn.Conv2d, activation: str = "relu") -> None:
+    # He initialization matched to the activation that follows the convolution.
+    nn.init.kaiming_normal_(conv.weight, a=_LEAKY_SLOPE if activation == "leaky_relu" else 0,
+                            mode="fan_out", nonlinearity=activation)
     if conv.bias is not None:
         nn.init.zeros_(conv.bias)
 
@@ -73,51 +87,53 @@ def _init_conv(conv: nn.Conv2d) -> None:
 class _BasicBlock(nn.Module):
     """Two 3x3 convolutions with a residual add; identity or 1x1 projection skip."""
 
-    def __init__(self, in_channels: int, channels: int, stride: int) -> None:
+    def __init__(self, in_channels: int, channels: int, stride: int, activation: str = "relu") -> None:
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, channels, 3, stride=stride, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, 3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
-        self.relu = nn.ReLU(inplace=True)
+        self.act = _make_activation(activation)
         self.downsample = None
         if stride != 1 or in_channels != channels:
             self.downsample = nn.Sequential(
                 nn.Conv2d(in_channels, channels, 1, stride=stride, bias=False),
                 nn.BatchNorm2d(channels),
             )
-        _init_conv(self.conv1)
-        _init_conv(self.conv2)
+        _init_conv(self.conv1, activation)
+        _init_conv(self.conv2, activation)
         if self.downsample is not None:
-            _init_conv(self.downsample[0])
+            _init_conv(self.downsample[0], activation)
 
     def forward(self, x: Tensor) -> Tensor:
         identity = x
-        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.act(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
         if self.downsample is not None:
             identity = self.downsample(x)
-        return self.relu(out + identity)
+        return self.act(out + identity)
 
 
 class ScratchEncoder(nn.Module):
     """A stem, four residual stages, and the final spatial feature map."""
 
-    def __init__(self, stem_width: int, stage_widths: tuple[int, ...], stage_blocks: tuple[int, ...]) -> None:
+    def __init__(self, stem_width: int, stage_widths: tuple[int, ...], stage_blocks: tuple[int, ...],
+                 activation: str = "relu") -> None:
         super().__init__()
         self.stem = nn.Sequential(
             nn.Conv2d(3, stem_width, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(stem_width),
-            nn.ReLU(inplace=True),
+            _make_activation(activation),
             nn.MaxPool2d(3, stride=2, padding=1),
         )
-        _init_conv(self.stem[0])
+        _init_conv(self.stem[0], activation)
         stages = []
         in_channels = stem_width
         for stage_index, (width, blocks) in enumerate(zip(stage_widths, stage_blocks)):
             stride = 1 if stage_index == 0 else 2
-            modules = [_BasicBlock(in_channels, width, stride=stride)]
-            modules.extend(_BasicBlock(width, width, stride=1) for _ in range(blocks - 1))
+            modules = [_BasicBlock(in_channels, width, stride=stride, activation=activation)]
+            modules.extend(_BasicBlock(width, width, stride=1, activation=activation)
+                           for _ in range(blocks - 1))
             stages.append(nn.Sequential(*modules))
             in_channels = width
         self.stages = nn.Sequential(*stages)
@@ -138,7 +154,7 @@ class ScratchClassifier(nn.Module):
         super().__init__()
         self.config = config
         self.spec = get_scratch_spec()
-        self.encoder = ScratchEncoder(_STEM_WIDTH, _STAGE_WIDTHS, _STAGE_BLOCKS)
+        self.encoder = ScratchEncoder(_STEM_WIDTH, _STAGE_WIDTHS, _STAGE_BLOCKS, config.activation)
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.head = nn.Sequential(
             nn.Dropout(config.head_dropout),
