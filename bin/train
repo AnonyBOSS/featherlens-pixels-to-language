@@ -15,4 +15,6 @@ if [ "$#" -eq 0 ]; then
     CONFIG_ARG=("--config" "${PROJECT_ROOT}/configs/cls.yaml")
 fi
 
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+
 exec "$PYTHON" -m src.cli train "${CONFIG_ARG[@]}" "$@"
