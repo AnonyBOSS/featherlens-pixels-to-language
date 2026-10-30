@@ -17,10 +17,12 @@ def test_cli_help():
     assert "tune" in result.stdout
     assert "gradcam" in result.stdout
     assert "predict" in result.stdout
+    assert "evaluate" in result.stdout
+    assert "test" in result.stdout
 
 
 def test_cli_subcommand_help():
-    for subcmd in ("train", "tune", "gradcam", "predict"):
+    for subcmd in ("train", "tune", "gradcam", "predict", "evaluate", "test"):
         result = subprocess.run(
             [sys.executable, "-m", "src.cli", subcmd, "--help"],
             capture_output=True,

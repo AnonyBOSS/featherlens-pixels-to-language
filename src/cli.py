@@ -243,6 +243,64 @@ def _cmd_gradcam(args: argparse.Namespace) -> None:
     print(f"Saved Grad-CAM attention comparison (correct vs wrong) to {out_path}")
 
 
+def _cmd_evaluate(args: argparse.Namespace) -> None:
+    print(f"Loading configuration from {args.config}...")
+    cfg = _load_yaml_config(args.config)
+    output_dir = Path(cfg.get("output_dir", "outputs/classification_run"))
+    checkpoint_path = Path(args.checkpoint) if args.checkpoint else output_dir / "best_model.pt"
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Model checkpoint not found at {checkpoint_path}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model_config = checkpoint.get("model_config", ScratchConfig())
+    model = create_scratch_model(model_config)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+    model.eval()
+
+    split_name = args.split
+    data_cfg = cfg.get("data", {})
+    prepared_dir = Path(data_cfg.get("prepared_dir", "outputs/classification-v1"))
+    manifest = load_classification_manifest(prepared_dir)
+    source = load_cub_split("train")
+
+    dataset = CubClassificationDataset(
+        source,
+        manifest,
+        partition=split_name,
+        transform=classification_transform(training=False),
+    )
+    from torch.utils.data import DataLoader
+    loader = DataLoader(
+        dataset,
+        batch_size=int(data_cfg.get("batch_size", 32)),
+        shuffle=False,
+        num_workers=int(data_cfg.get("num_workers", 0)),
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    print(f"Evaluating {checkpoint_path.name} on '{split_name}' split ({len(dataset)} samples)...")
+    loss, matrix = evaluate_classification(model, loader, device=device)
+    metrics = summarize_classification(matrix)
+
+    print(f"\n--- {split_name.capitalize()} Evaluation Metrics ---")
+    print(f"Loss:            {loss:.4f}")
+    print(f"Accuracy:        {metrics['accuracy']:.4%}")
+    print(f"Macro Precision: {metrics['macro_precision']:.4f}")
+    print(f"Macro Recall:    {metrics['macro_recall']:.4f}")
+    print(f"Macro F1-Score:  {metrics['macro_f1']:.4f}")
+
+    metrics["loss"] = loss
+    metrics["num_samples"] = len(dataset)
+    metrics_file = output_dir / f"{split_name}_metrics.json"
+    with open(metrics_file, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"Saved metrics to {metrics_file}")
+
+
 def _cmd_predict(args: argparse.Namespace) -> None:
     checkpoint_path = Path(args.checkpoint) if args.checkpoint else Path("outputs/classification_run/best_model.pt")
     if not checkpoint_path.exists():
@@ -277,7 +335,7 @@ def main(argv=None) -> int:
     # 1. train
     p_train = subparsers.add_parser("train", help="Train a model")
     p_train.add_argument("--task", default="classification", choices=["classification"])
-    p_train.add_argument("--config", default="configs/cls.yaml", help="Path to YAML or JSON config")
+    p_train.add_argument("--config", required=True, help="Path to YAML or JSON config")
     p_train.add_argument("--prepared-dir", type=Path, default=None, help="Path to prepared split directory")
     p_train.add_argument("--run-dir", type=Path, default=None, help="Path to run output directory")
     p_train.add_argument("--device", default=None, help="Computation device (e.g., cpu, cuda)")
@@ -301,6 +359,14 @@ def main(argv=None) -> int:
     p_pred.add_argument("--image", required=True, help="Path to input image")
     p_pred.add_argument("--checkpoint", default=None, help="Path to model checkpoint")
 
+    # 5. evaluate / test
+    for cmd_name, help_text in [("evaluate", "Evaluate a trained checkpoint on val or test split"), ("test", "Alias for evaluate on test split")]:
+        p_eval = subparsers.add_parser(cmd_name, help=help_text)
+        p_eval.add_argument("--task", default="classification", choices=["classification"])
+        p_eval.add_argument("--config", default="configs/cls.yaml", help="Path to YAML config")
+        p_eval.add_argument("--checkpoint", default=None, help="Path to model checkpoint (default: best_model.pt)")
+        p_eval.add_argument("--split", default="test" if cmd_name == "test" else "val", choices=["train", "val", "test"], help="Dataset split to evaluate")
+
     args = parser.parse_args(argv)
     if args.command == "train":
         return _cmd_train(args)
@@ -312,6 +378,9 @@ def main(argv=None) -> int:
         return 0
     elif args.command == "predict":
         _cmd_predict(args)
+        return 0
+    elif args.command in ("evaluate", "test"):
+        _cmd_evaluate(args)
         return 0
     return 0
 
