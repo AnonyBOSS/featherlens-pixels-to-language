@@ -14,11 +14,11 @@ and what remains before the Milestone 1 submission.
 A residual CNN written from random initialization, with no pretrained
 parameters anywhere (the required Task 1.2 baseline):
 
-- 3x3 stem (stride 2) + maxpool, four residual stages at 64/128/256/256 with
-  two basic blocks each (BatchNorm, ReLU, 1x1 projection skips), global
-  average pooling, dropout, and a 200-logit head.
-- 5,236,712 parameters; about 1.35 GMACs per 224x224 image; output stride 32
-  with a 7x7 final spatial map, matching the pretrained adapters' geometry.
+- Single 3x3 conv (stride 2) stem with width 32 + maxpool, four residual stages at
+  64/128/256/256 with (2, 2, 1, 1) residual blocks (6 blocks total), 3x3 MaxPool
+  (stride 2, padding 1) + global average pooling, dropout (0.4), and a 200-logit head.
+- 2,875,368 parameters; output stride 32 with a 7x7 final spatial map, matching the
+  pretrained adapters' geometry.
 - Same wrapper contract as `PretrainedClassifier`: `forward_features`
   returning `{"spatial", "pooled"}`, `gradcam_target_layer`, serializable
   `ScratchSpec`, and a validated frozen `ScratchConfig`.

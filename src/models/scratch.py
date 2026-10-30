@@ -17,9 +17,9 @@ from torch import Tensor, nn
 
 
 _ARCHITECTURE = "scratch_resnet"
-_STEM_WIDTH = 64
+_STEM_WIDTH = 32
 _STAGE_WIDTHS = (64, 128, 256, 256)
-_STAGE_BLOCKS = (2, 2, 3, 2)
+_STAGE_BLOCKS = (2, 2, 1, 1)
 _LEAKY_SLOPE = 0.1
 _ACTIVATIONS = {"relu", "leaky_relu"}
 
@@ -84,39 +84,8 @@ def _init_conv(conv: nn.Conv2d, activation: str = "relu") -> None:
         nn.init.zeros_(conv.bias)
 
 
-class _SEBlock(nn.Module):
-    """Lightweight Squeeze-and-Excitation channel attention built from pure PyTorch layers."""
-
-    def __init__(self, channels: int, reduction: int = 16, activation: str = "relu") -> None:
-        super().__init__()
-        mid = max(8, channels // reduction)
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.fc1 = nn.Conv2d(channels, mid, 1)
-        self.act = _make_activation(activation)
-        self.fc2 = nn.Conv2d(mid, channels, 1)
-        self.gate = nn.Sigmoid()
-        _init_conv(self.fc1, activation)
-        _init_conv(self.fc2, activation)
-
-    def forward(self, x: Tensor) -> Tensor:
-        scale = self.gate(self.fc2(self.act(self.fc1(self.pool(x)))))
-        return x * scale
-
-
-class _HybridPool2d(nn.Module):
-    """Combine Global Average Pooling and Global Max Pooling to preserve small bird parts."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return 0.5 * (self.avg_pool(x) + self.max_pool(x))
-
-
 class _BasicBlock(nn.Module):
-    """Two 3x3 convolutions with SE channel attention and a residual skip connection."""
+    """Two 3x3 convolutions with a residual skip connection."""
 
     def __init__(self, in_channels: int, channels: int, stride: int, activation: str = "relu") -> None:
         super().__init__()
@@ -124,7 +93,6 @@ class _BasicBlock(nn.Module):
         self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, 3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
-        self.se = _SEBlock(channels, reduction=16, activation=activation)
         self.act = _make_activation(activation)
         self.downsample = None
         if stride != 1 or in_channels != channels:
@@ -140,14 +108,14 @@ class _BasicBlock(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         identity = x
         out = self.act(self.bn1(self.conv1(x)))
-        out = self.se(self.bn2(self.conv2(out)))
+        out = self.bn2(self.conv2(out))
         if self.downsample is not None:
             identity = self.downsample(x)
         return self.act(out + identity)
 
 
 class ScratchEncoder(nn.Module):
-    """A 2-conv high-resolution stem, four residual stages, and the final spatial feature map."""
+    """A single-conv stem, four residual stages, and the final spatial feature map."""
 
     def __init__(self, stem_width: int, stage_widths: tuple[int, ...], stage_blocks: tuple[int, ...],
                  activation: str = "relu") -> None:
@@ -156,13 +124,9 @@ class ScratchEncoder(nn.Module):
             nn.Conv2d(3, stem_width, 3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(stem_width),
             _make_activation(activation),
-            nn.Conv2d(stem_width, stem_width, 3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(stem_width),
-            _make_activation(activation),
             nn.MaxPool2d(3, stride=2, padding=1),
         )
         _init_conv(self.stem[0], activation)
-        _init_conv(self.stem[3], activation)
         stages = []
         in_channels = stem_width
         for stage_index, (width, blocks) in enumerate(zip(stage_widths, stage_blocks)):
@@ -179,7 +143,7 @@ class ScratchEncoder(nn.Module):
 
 
 class ScratchClassifier(nn.Module):
-    """A fully trainable spatial encoder, hybrid avg+max pooling, and a 200-logit head.
+    """A fully trainable spatial encoder, max pool + global average pooling, and a 200-logit head.
 
     Every parameter is trained from random initialization, so there is no
     fine-tuning policy to apply. CAM callers may still set
@@ -191,7 +155,10 @@ class ScratchClassifier(nn.Module):
         self.config = config
         self.spec = get_scratch_spec()
         self.encoder = ScratchEncoder(_STEM_WIDTH, _STAGE_WIDTHS, _STAGE_BLOCKS, config.activation)
-        self.pool = _HybridPool2d()
+        self.pool = nn.Sequential(
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            nn.AdaptiveAvgPool2d(1),
+        )
         self.head = nn.Sequential(
             nn.Dropout(config.head_dropout),
             nn.Linear(_STAGE_WIDTHS[-1], config.num_classes),
