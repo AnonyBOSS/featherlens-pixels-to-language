@@ -15,7 +15,7 @@ model:
   num_classes: 200
 
 training:
-  epochs: 150
+  epochs: 300
   optimizer: "adam"         # "adam", "sgd", "adagrad"
   learning_rate: 0.001
   weight_decay: 0.0005
