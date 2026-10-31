@@ -42,3 +42,6 @@ dist/
 # Folder to store personal notes/ files relating to the 
 # project that u don't want on the commit history
 personal/
+
+# Personal experiment docs (resnet50 training notes)
+docs/resnet50_*.md
