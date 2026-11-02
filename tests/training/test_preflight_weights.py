@@ -303,3 +303,49 @@ def test_unsupported_filename_hash_fails_before_cache_io(api, monkeypatch):
     monkeypatch.setattr(torch.hub, "get_dir", lambda: pytest.fail("unsupported artifact accessed cache"))
     with pytest.raises(ValueError, match="hash prefix"):
         api.prepare_official_weight(ModelConfig("efficientnet_b3"), offline=True)
+
+
+def test_fb_profile_resolves_full_hash_and_immutable_revision_without_io(api, monkeypatch):
+    from src.models.pretrained import FB22K_WEIGHT_ID
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: pytest.fail("metadata accessed cache"))
+    info = api.resolve_weight_info(ModelConfig("convnext_tiny", weights=FB22K_WEIGHT_ID))
+    assert info["weight_id"] == FB22K_WEIGHT_ID
+    assert info["revision"] == "32c741ba106f9e062174ef829354a16719c3dcac"
+    assert info["hash_prefix"] == "c1253ad2d4a751cb0b1fb92a850f99e8f426a701d6e7600b03a490557d77bdcd"
+    assert "/resolve/" + info["revision"] + "/" in info["url"]
+    assert info["hash_prefix"] in info["filename"]
+
+
+def test_v2base_pinned_metadata_and_safe_cpu_state_reader(api, tmp_path, monkeypatch):
+    from src.models.pretrained import V2BASE_WEIGHT_ID, load_safe_weight_state
+    save_file = pytest.importorskip("safetensors.torch").save_file
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: pytest.fail("metadata accessed cache"))
+    info = api.resolve_weight_info(ModelConfig("convnextv2_base"))
+    assert info["weight_id"] == V2BASE_WEIGHT_ID
+    assert info["revision"] == "bea9dc139d5981aff6ce4d6d9690086e45ad8b56"
+    assert info["hash_prefix"] == "972bcbb8d9965eca7a2f72d9592f54dfc890f9e6aef920cea4269963f46f2f42"
+    assert info["source_profile"] == "convnextv2_base.fcmae_ft_in22k_in1k_384"
+    path = tmp_path / "small.safetensors"
+    state = {"weight": torch.arange(6, dtype=torch.float32).reshape(2, 3)}
+    save_file(state, str(path))
+    loaded = load_safe_weight_state(path)
+    assert loaded["weight"].device.type == "cpu"
+    assert torch.equal(loaded["weight"], state["weight"])
+
+
+def test_v2base_proof_checks_all_retained_tensors_and_native_head(api):
+    timm = pytest.importorskip("timm")
+    native = timm.create_model("convnextv2_base", pretrained=False)
+    state = native.state_dict()
+    model = PretrainedClassifier(ModelConfig("convnextv2_base"), native, weights_loaded=False)
+    proof = api.verify_backbone_state(model, state)
+    assert proof["retained_tensor_count"] == 378
+    assert proof["excluded_native_head_keys"] == ["head.fc.bias", "head.fc.weight"]
+    bad = dict(state)
+    bad["head.norm.bias"] = bad["head.norm.bias"] + 1
+    with pytest.raises(ValueError, match="value"):
+        api.verify_backbone_state(model, bad)
+    bad = dict(state)
+    bad["head.fc.weight"] = bad["head.fc.weight"][:200]
+    with pytest.raises(ValueError, match="1000|shape"):
+        api.verify_backbone_state(model, bad)

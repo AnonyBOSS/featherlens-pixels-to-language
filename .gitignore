@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv-*/
 venv/
 .env
 .env.*
@@ -42,3 +43,7 @@ dist/
 # Folder to store personal notes/ files relating to the 
 # project that u don't want on the commit history
 personal/
+
+# Local agent planning and execution notes
+/docs/superpowers/
+/.superpowers/

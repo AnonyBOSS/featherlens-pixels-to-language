@@ -72,14 +72,21 @@ def _step(optimizer, scaler, num_samples):
 
 
 def train_epoch(model, loader, optimizer, device, *, accumulation_steps=1,
-                precision='fp32', scaler=None, progress=False) -> dict:
+                precision='fp32', scaler=None, progress=False, label_smoothing=0.0, mixup_alpha=0.0) -> dict:
     """Train once over dictionary batches; the adapter owns its training policy.
 
     FP16 creates a GradScaler at scale 128 when none is supplied. Pass a scaler
     across epochs to preserve its state. A supplied scaler also permits CPU
     arithmetic checks. Loss and accuracy cover every sample, including skipped
     AMP updates. The loader may be an iterator without a length.
+    Training loss uses the optional smoothed objective; evaluation stays unsmoothed.
+    Positive MixUp alpha mixes within each microbatch; its accuracy is MixUp-weighted.
     """
+    if (type(label_smoothing) not in (int, float) or not math.isfinite(label_smoothing)
+            or not 0 <= label_smoothing < 1):
+        raise ValueError('label_smoothing must be finite and between 0 (inclusive) and 1 (exclusive)')
+    if type(mixup_alpha) not in (int, float) or not math.isfinite(mixup_alpha) or mixup_alpha < 0:
+        raise ValueError('mixup_alpha must be finite and nonnegative')
     if type(accumulation_steps) is not int or accumulation_steps < 1:
         raise ValueError('accumulation_steps must be a positive integer')
     device = torch.device(device)
@@ -92,9 +99,18 @@ def train_epoch(model, loader, optimizer, device, *, accumulation_steps=1,
     updates = skipped = 0
     for batch_index, batch in enumerate(loader, 1):
         images, labels = batch['image'].to(device), batch['label'].to(device)
+        if mixup_alpha > 0:
+            coefficient = float(np.random.beta(mixup_alpha, mixup_alpha))
+            permutation = torch.randperm(len(labels), device=device)
+            other_labels = labels[permutation]
+            images = coefficient * images + (1 - coefficient) * images[permutation]
         with _autocast(precision, device):
             logits = model(images)
-            loss = nn.functional.cross_entropy(logits, labels, reduction='sum')
+            loss = nn.functional.cross_entropy(
+                logits, labels, reduction='sum', label_smoothing=label_smoothing)
+            if mixup_alpha > 0:
+                loss = coefficient * loss + (1 - coefficient) * nn.functional.cross_entropy(
+                    logits, other_labels, reduction='sum', label_smoothing=label_smoothing)
         if not torch.isfinite(loss):
             raise FloatingPointError('Non-finite training loss')
         if scaler is None:
@@ -103,7 +119,12 @@ def train_epoch(model, loader, optimizer, device, *, accumulation_steps=1,
             scaler.scale(loss).backward()
         count = len(labels)
         loss_sum += loss.detach().item()
-        correct += (logits.detach().argmax(dim=1) == labels).sum().item()
+        if mixup_alpha > 0:
+            predicted = logits.detach().argmax(dim=1)
+            correct += (coefficient * (predicted == labels).sum().item()
+                        + (1 - coefficient) * (predicted == other_labels).sum().item())
+        else:
+            correct += (logits.detach().argmax(dim=1) == labels).sum().item()
         num_samples += count
         window_samples += count
         window_batches += 1
@@ -120,8 +141,11 @@ def train_epoch(model, loader, optimizer, device, *, accumulation_steps=1,
         successful = _step(optimizer, scaler, window_samples)
         updates += int(successful)
         skipped += int(not successful)
-    return {'loss': loss_sum / num_samples, 'top1_accuracy': correct / num_samples,
-            'num_samples': num_samples, 'optimizer_updates': updates, 'skipped_updates': skipped}
+    result = {'loss': loss_sum / num_samples, 'top1_accuracy': correct / num_samples,
+              'num_samples': num_samples, 'optimizer_updates': updates, 'skipped_updates': skipped}
+    if mixup_alpha > 0:
+        result['accuracy_kind'] = 'mixup_weighted'
+    return result
 
 
 @torch.inference_mode()
@@ -232,9 +256,15 @@ class TrainConfig:
     image_size: int = 224
     normalization: tuple | None = IMAGENET_NORMALIZATION
     selection_metric: str = 'val_loss'
+    label_smoothing: float = 0.0
+    color_jitter: float = 0.0
+    weights: str | None = None
+    mixup_alpha: float = 0.0
 
     def __post_init__(self):
-        ModelConfig(self.architecture, head_dropout=self.head_dropout, freeze_bn_stats=self.freeze_bn_stats)
+        model_config = ModelConfig(self.architecture, weights=self.weights,
+                                   head_dropout=self.head_dropout, freeze_bn_stats=self.freeze_bn_stats)
+        object.__setattr__(self, 'weights', model_config.weights)
         if not isinstance(self.phases, (tuple, list)) or not self.phases or any(
                 not isinstance(phase, Phase) for phase in self.phases):
             raise ValueError('phases must be a nonempty sequence of Phase values')
@@ -247,18 +277,24 @@ class TrainConfig:
             raise ValueError('seed must be below 2**32')
         if self.amp not in ('off', 'auto', 'float16', 'bfloat16'):
             raise ValueError('amp must be off, auto, float16 or bfloat16')
-        for name in ('weight_decay', 'min_delta', 'lr_decay'):
+        for name in ('weight_decay', 'min_delta', 'lr_decay', 'mixup_alpha'):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
                 raise ValueError(f'{name} must be finite and nonnegative')
+        object.__setattr__(self, 'mixup_alpha', float(self.mixup_alpha) if self.mixup_alpha else 0.0)
         if self.lr_decay == 0:
             raise ValueError('lr_decay must be positive')
         if self.patience is not None and (type(self.patience) is not int or self.patience < 1):
             raise ValueError('patience must be a positive integer or None')
         if self.selection_metric not in ('val_loss', 'val_macro_f1'):
             raise ValueError('selection_metric must be val_loss or val_macro_f1')
-        preprocessing = PreprocessingConfig(self.image_size, self.normalization)
+        if (type(self.label_smoothing) not in (int, float) or not math.isfinite(self.label_smoothing)
+                or not 0 <= self.label_smoothing < 1):
+            raise ValueError('label_smoothing must be finite and between 0 (inclusive) and 1 (exclusive)')
+        object.__setattr__(self, 'label_smoothing', float(self.label_smoothing) if self.label_smoothing else 0.0)
+        preprocessing = PreprocessingConfig(self.image_size, self.normalization, self.color_jitter)
         object.__setattr__(self, 'normalization', preprocessing.normalization)
+        object.__setattr__(self, 'color_jitter', preprocessing.color_jitter)
 
     def to_dict(self):
         """JSON-normalized settings, including lists for immutable tuple fields."""
@@ -306,7 +342,8 @@ def fit(model, loaders, config, run_dir, *, data_identity, weight_provenance,
         source = getattr(loader.dataset, 'source', None)
         if source is not None and list(source.class_names) != list(class_names):
             raise ValueError(f'{name} loader class mapping differs from data_identity')
-    if (model.config.architecture != config.architecture or model.config.head_dropout != config.head_dropout
+    if (model.config.architecture != config.architecture or model.config.weights != config.weights
+            or model.config.head_dropout != config.head_dropout
             or model.config.freeze_bn_stats != config.freeze_bn_stats):
         raise ValueError('model config does not match training config')
     run_dir = Path(run_dir)
@@ -386,7 +423,8 @@ def fit(model, loaders, config, run_dir, *, data_identity, weight_provenance,
             learning_rate = optimizer.param_groups[0]['lr']
             backbone_learning_rate = optimizer.param_groups[-1]['lr'] if backbone_parameters else None
             training = train_epoch(model, loaders['train'], optimizer, device,
-                                   accumulation_steps=config.accumulation_steps, precision=precision, scaler=scaler)
+                                   accumulation_steps=config.accumulation_steps, precision=precision, scaler=scaler,
+                                   label_smoothing=config.label_smoothing, mixup_alpha=config.mixup_alpha)
             if training['optimizer_updates'] == 0:
                 raise RuntimeError('Epoch completed with zero successful optimizer updates')
             validation = evaluate(model, loaders['val'], device, class_names=class_names, precision=precision)
@@ -416,6 +454,8 @@ def fit(model, loaders, config, run_dir, *, data_identity, weight_provenance,
                       'optimizer_updates': training['optimizer_updates'], 'skipped_updates': training['skipped_updates'],
                       'total_optimizer_updates': total_updates, 'num_train_samples': training['num_samples'],
                       'num_val_samples': validation['num_samples'], 'is_best': is_best}
+            if config.mixup_alpha > 0:
+                record['train_accuracy_kind'] = training['accuracy_kind']
             history.append(record)
             scheduler.step()
             if on_epoch is not None:

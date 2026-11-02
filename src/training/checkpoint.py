@@ -62,7 +62,8 @@ def _validate(payload):
         if (payload['epoch_in_phase'] > phase.epochs
                 or completed != sum(p.epochs for p in config.phases[:phase_index]) + payload['epoch_in_phase']):
             raise ValueError('Inconsistent checkpoint epoch progress')
-        if (model_config.architecture != config.architecture or model_config.fine_tuning != phase.mode
+        if (model_config.architecture != config.architecture or model_config.weights != config.weights
+                or model_config.fine_tuning != phase.mode
                 or model_config.head_dropout != config.head_dropout or model_config.freeze_bn_stats != config.freeze_bn_stats):
             raise ValueError('Checkpoint model config differs from training config')
         precision = payload['resolved_precision']
