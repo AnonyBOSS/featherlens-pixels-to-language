@@ -47,3 +47,5 @@ personal/
 # Local agent planning and execution notes
 /docs/superpowers/
 /.superpowers/
+# Personal experiment docs (resnet50 training notes)
+docs/resnet50_*.md

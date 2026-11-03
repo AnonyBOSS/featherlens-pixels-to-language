@@ -11,7 +11,7 @@ functionality lives in Python modules; notebooks call those modules for experime
 The revision-pinned data loader, integrity audit, classification preparation and
 statistical EDA are implemented. Our pretrained track provides training/recovery,
 experiment tracking, reusable encoder features, portable prediction, evaluation and
-component Grad-CAM. Colorization and captioning remain planned.
+component Grad-CAM. The merged ResNet-50 track provides its own training, prediction, evaluation, search and Grad-CAM modules. Colorization and captioning remain planned.
 
 Our delivered classifier averages ConvNeXt-Tiny and ConvNeXt-V2 Base probabilities
 50/50 using the original image view:
@@ -20,6 +20,10 @@ Our delivered classifier averages ConvNeXt-Tiny and ConvNeXt-V2 Base probabiliti
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Validation | 1,200 | 90.9167% | 91.9721% | 90.9167% | 90.6110% |
 | Official test | 5,794 | 90.3003% | 90.6041% | 90.3735% | 90.1246% |
+
+The separately delivered iNaturalist ResNet-50 reports 87.92% validation and 87.54%
+test accuracy. See its [workflow and retained results](docs/resnet50.md) for the
+saved-model protocol, tuning study and disclosed earlier test exposure.
 
 These are measured saved results. The separate 91.00% flip-TTA result is
 validation-only; 94% was not achieved. The team's ResNet50, scratch CNN and
@@ -42,9 +46,11 @@ Windows PowerShell: `.venv\Scripts\Activate.ps1`. Linux/macOS: `source .venv/bin
 | Statistical EDA and its tests | [requirements-eda.txt](requirements-eda.txt) | [EDA handoff](docs/eda_handoff.md) |
 | Classification data preparation and loading | [requirements-classification.txt](requirements-classification.txt) | [Classification data](docs/classification_data.md) |
 | Complete CPU development/training dependencies | [requirements.txt](requirements.txt) | [CPU setup](docs/pretrained_cnn_foundation.md#cpu-development-setup) |
-| Selected classifier inference and evaluation | [requirements-inference.txt](requirements-inference.txt) | [Pretrained handoff](docs/pretrained_handoff.md) |
+| ResNet-50 workflow | [requirements-resnet50.txt](requirements-resnet50.txt) | [ResNet-50 guide](docs/resnet50.md) |
+| Selected classifier inference and evaluation | [requirements-inference.txt](requirements-inference.txt) | [ResNet-50 workflow](docs/resnet50.md) | Merged ResNet model, training/refit, prediction, evaluation, Grad-CAM and search |
+| [Pretrained handoff](docs/pretrained_handoff.md) |
 
-Choose one profile. The classification/development CPU profile pins Torch 2.14.1
+Choose the profile for your workflow; do not install the historical CPU pins over a working CUDA stack. The classification/development CPU profile pins Torch 2.14.1
 and Torchvision 0.29.1; the inference profile pins the verified Torch 2.11.0 /
 Torchvision 0.26.0 runtime. Keep these environments separate. For CUDA, follow
 the selected guide and preserve a compatible accelerator build. The inference
@@ -88,6 +94,20 @@ Statistical EDA covers the complete raw official-training population of 5,994
 images and 59,940 captions, including derived-validation members. Its summaries
 exclude official test. See the [EDA handoff](docs/eda_handoff.md) for figures and findings.
 
+## Selected iNaturalist ResNet-50 workflow
+
+The complete merged [ResNet-50 guide](docs/resnet50.md) preserves its configurations,
+source hashes, 224px encoder training, 320px classifier refit and saved-model commands.
+The shared [preparation directory](preparation/README.md) contains the approved
+metadata; source images and trained weights remain separate.
+
+### Grid versus random search for ResNet-50
+
+The recorded study compared eight grid and eight random LDA-shrinkage trials.
+See the [search protocol and results](docs/resnet50.md#grid-versus-random-search-for-resnet-50)
+for trial budgets, timing exclusions and the distinction from the selected
+original-plus-flipped-view classifier. It is not a new experiment from integration.
+
 ## Project structure
 
 ```text
@@ -109,6 +129,7 @@ featherlens/
 ├── requirements-eda.txt
 ├── requirements-classification.txt
 ├── requirements-inference.txt
+├── requirements-resnet50.txt
 ├── requirements.txt
 └── README.md
 ```
@@ -117,6 +138,7 @@ featherlens/
 
 | Start here | Purpose |
 | --- | --- |
+| [ResNet-50 workflow](docs/resnet50.md) | Merged ResNet model, training/refit, prediction, evaluation, Grad-CAM and search |
 | [Pretrained handoff](docs/pretrained_handoff.md) | Current prediction, evaluation, Grad-CAM and encoder usage |
 | [CNN technical reference](docs/pretrained_cnn_foundation.md) | Model configuration, fine-tuning, training and recovery |
 | [Classification data](docs/classification_data.md) | Audit-backed manifests, splits, transforms and DataLoaders |

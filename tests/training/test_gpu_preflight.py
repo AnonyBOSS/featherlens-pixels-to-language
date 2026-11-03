@@ -168,6 +168,8 @@ def test_mocked_candidate_failures_preserve_later_coverage(canonical_fixture, tm
     runtime = api()
     facts = runtime.collect_runtime()
     facts['cuda']['available'] = True
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(torch.accelerator, 'is_available', lambda: False)
     monkeypatch.setattr(runtime, 'collect_runtime', lambda **kw: facts)
     monkeypatch.setattr(runtime, '_load_train_source', lambda **kw: pinned_source)
     def candidate(config, architecture, batches):
@@ -201,6 +203,8 @@ def test_diagnostic_subset_and_disabled_amp_cannot_be_full_acceptance(canonical_
     runtime = api()
     facts = runtime.collect_runtime()
     facts['cuda']['available'] = True
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(torch.accelerator, 'is_available', lambda: False)
     monkeypatch.setattr(runtime, 'collect_runtime', lambda **kw: facts)
     monkeypatch.setattr(runtime, '_load_train_source', lambda **kw: pinned_source)
     monkeypatch.setattr(runtime, '_run_candidate', lambda c, a, b: {'architecture': a, 'status': 'passed', 'failures': []})

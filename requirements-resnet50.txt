@@ -1,0 +1,7 @@
+# ResNet-50 runner and local MLflow tracking; includes the shared data stack.
+# Install the CUDA PyTorch build separately before this file when using a GPU.
+-r requirements-classification.txt
+PyYAML==6.0.3
+mlflow==3.17.2
+# Compatible with both MLflow's <26 bound and datasets' >=21 bound.
+pyarrow==25.0.1

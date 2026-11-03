@@ -187,6 +187,6 @@ semantic-quality audits. Descriptive image means already exist for every class.
 Contrast is not a blur measurement. Supplied integrity flags do not certify
 annotation correctness or perceptual near-duplicate absence.
 
-The [README contribution proposal](eda_readme_proposal.md) is incorporated in
-the coordinator documentation follow-up. Shared loading, cleaning, splitting,
+The EDA documentation additions are incorporated in the [README](../README.md).
+Shared loading, cleaning, splitting,
 transforms and statistical calculations remain unchanged.
