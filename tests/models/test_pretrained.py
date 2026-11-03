@@ -146,3 +146,117 @@ def test_real_weight_loader_errors_propagate_without_random_fallback(api, monkey
 def test_factory_rejects_non_boolean_loader_flags(api, argument):
     with pytest.raises((TypeError, ValueError)):
         api.create_pretrained_model(api.ModelConfig("convnext_tiny"), **argument)
+
+
+def test_fb22k_profile_is_explicit_and_offline_construction_does_not_fetch(api, monkeypatch):
+    config = api.ModelConfig("convnext_tiny", weights=api.FB22K_WEIGHT_ID)
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: pytest.fail("offline construction accessed cache"))
+    model = api.create_pretrained_model(config, load_weights=False)
+    assert model.spec.weight_id == api.FB22K_WEIGHT_ID
+    assert model.spec.native_preprocessing["crop_size"] == [384]
+    assert model.spec.native_preprocessing["interpolation"] == "bicubic"
+    assert model.loaded_weight_id is None
+    with pytest.raises(ValueError, match="weights"):
+        api.ModelConfig("efficientnet_b3", weights=api.FB22K_WEIGHT_ID)
+
+
+@pytest.fixture(scope="module")
+def synthetic_fb_state():
+    """Independent random native state expressed in the external key layout."""
+    native = models.convnext_tiny(weights=None).state_dict()
+    raw = {}
+    for key, value in native.items():
+        if key.startswith("classifier."):
+            external = key.replace("classifier.0.", "head.norm.").replace("classifier.2.", "head.fc.")
+        elif key.startswith("features.0."):
+            external = key.replace("features.0.", "stem.")
+        else:
+            _, feature, block, *rest = key.split(".")
+            feature = int(feature)
+            if feature % 2 == 0:
+                external = f"stages.{feature // 2}.downsample.{block}." + ".".join(rest)
+            else:
+                suffix = ".".join(rest)
+                if suffix == "layer_scale":
+                    suffix = "gamma"
+                    value = value.flatten()
+                else:
+                    suffix = suffix.replace("block.0.", "conv_dw.").replace("block.2.", "norm.").replace("block.3.", "mlp.fc1.").replace("block.5.", "mlp.fc2.")
+                external = f"stages.{feature // 2}.blocks.{block}.{suffix}"
+        raw[external] = value
+    return native, raw
+
+
+def test_fb_conversion_preserves_every_native_tensor_and_replaces_only_head(api, synthetic_fb_state, monkeypatch):
+    native, raw = synthetic_fb_state
+    converted = api.convert_fb_convnext_tiny_state(raw)
+    assert len(converted) == 182
+    assert set(converted) == set(native)
+    for key in native:
+        assert torch.equal(converted[key], native[key])
+    monkeypatch.setattr(api, "_load_fb22k_state", lambda progress: raw)
+    model = api.create_pretrained_model(api.ModelConfig("convnext_tiny", weights=api.FB22K_WEIGHT_ID))
+    assert model.loaded_weight_id == api.FB22K_WEIGHT_ID
+    assert model.head[1].weight.shape == (200, 768)
+    for key, value in model.encoder.state_dict().items():
+        assert torch.equal(value, native["features." + key])
+
+
+@pytest.mark.parametrize("corruption", ["missing", "extra", "shape", "dtype", "nan", "type", "head"])
+def test_fb_conversion_rejects_incompatible_artifacts(api, synthetic_fb_state, corruption):
+    _, fixture = synthetic_fb_state
+    raw = dict(fixture)
+    key = "stem.0.weight"
+    if corruption == "missing":
+        raw.pop(key)
+    elif corruption == "extra":
+        raw["unknown"] = torch.zeros(1)
+    elif corruption == "shape":
+        raw[key] = raw[key].flatten()
+    elif corruption == "dtype":
+        raw[key] = raw[key].double()
+    elif corruption == "nan":
+        raw[key] = raw[key].clone()
+        raw[key].view(-1)[0] = float("nan")
+    elif corruption == "type":
+        raw[key] = [1]
+    else:
+        raw["head.fc.weight"] = torch.zeros(200, 768)
+    with pytest.raises((ValueError, TypeError), match="checkpoint"):
+        api.convert_fb_convnext_tiny_state(raw)
+
+
+def test_fb_factory_rejects_corrupt_cached_bytes_without_network(api, tmp_path, monkeypatch):
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: str(tmp_path))
+    path = tmp_path / "checkpoints" / api.FB22K_WEIGHT_INFO["filename"]
+    path.parent.mkdir()
+    path.write_bytes(b"corrupt")
+    monkeypatch.setattr(torch.hub, "download_url_to_file", lambda *a, **k: pytest.fail("corrupt cache was replaced"))
+    with pytest.raises(ValueError, match="SHA-256"):
+        api.create_pretrained_model(api.ModelConfig("convnext_tiny", weights=api.FB22K_WEIGHT_ID))
+
+
+def test_v2base_has_one_pinned_profile_and_offline_native_features(api, monkeypatch):
+    timm = pytest.importorskip("timm")
+    config = api.ModelConfig("convnextv2_base")
+    assert config.weights == api.V2BASE_WEIGHT_ID
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: pytest.fail("offline construction accessed cache"))
+    torch.manual_seed(42)
+    native = timm.create_model("convnextv2_base", pretrained=False).eval()
+    torch.manual_seed(42)
+    wrapped = api.create_pretrained_model(config, load_weights=False).eval()
+    images = torch.randn(1, 3, 64, 64)
+    with torch.no_grad():
+        native_spatial = native.forward_features(images)
+        features = wrapped.forward_features(images)
+        torch.testing.assert_close(features["spatial"], native_spatial, rtol=0, atol=0)
+        torch.testing.assert_close(features["pooled"], native.forward_head(native_spatial, pre_logits=True), rtol=0, atol=0)
+        assert wrapped(images).shape == (1, 200)
+    assert wrapped.gradcam_target_layer is wrapped.encoder.stages[3]
+    assert not wrapped.weights_loaded
+    assert api.get_model_spec("convnextv2_base").native_preprocessing["crop_size"] == [384]
+    wrapped.set_fine_tuning("partial")
+    assert all(p.requires_grad for p in wrapped.encoder.stages[3].parameters())
+    assert all(not p.requires_grad for p in wrapped.encoder.stem.parameters())
+    with pytest.raises(ValueError, match="weights"):
+        api.ModelConfig("convnextv2_base", weights=api.FB22K_WEIGHT_ID)

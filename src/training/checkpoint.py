@@ -62,7 +62,8 @@ def _validate(payload):
         if (payload['epoch_in_phase'] > phase.epochs
                 or completed != sum(p.epochs for p in config.phases[:phase_index]) + payload['epoch_in_phase']):
             raise ValueError('Inconsistent checkpoint epoch progress')
-        if (model_config.architecture != config.architecture or model_config.fine_tuning != phase.mode
+        if (model_config.architecture != config.architecture or model_config.weights != config.weights
+                or model_config.fine_tuning != phase.mode
                 or model_config.head_dropout != config.head_dropout or model_config.freeze_bn_stats != config.freeze_bn_stats):
             raise ValueError('Checkpoint model config differs from training config')
         precision = payload['resolved_precision']
@@ -86,11 +87,14 @@ def _validate(payload):
                 or sum(row['optimizer_updates'] for row in history) != payload['optimizer_updates']
                 or any(row['optimizer_updates'] < 1 for row in history)):
             raise ValueError('Inconsistent checkpoint history')
+        selected = [row[config.selection_metric] for row in history]
+        optimum = max(selected) if config.selection_metric == 'val_macro_f1' else min(selected)
         if (payload['best_epoch'] > completed
                 or any(type(payload[key]) not in (int, float) or not math.isfinite(payload[key])
                        for key in ('best_loss', 'early_stop_best'))
                 or payload['best_loss'] != min(row['val_loss'] for row in history)
-                or history[payload['best_epoch'] - 1]['val_loss'] != payload['best_loss']
+                or any(type(value) not in (int, float) or not math.isfinite(value) for value in selected)
+                or payload['best_epoch'] != selected.index(optimum) + 1
                 or payload['validation']['loss'] != history[-1]['val_loss']):
             raise ValueError('Inconsistent checkpoint validation or best loss')
         for key in ('model_state', 'weight_provenance', 'data_identity', 'optimizer_state',

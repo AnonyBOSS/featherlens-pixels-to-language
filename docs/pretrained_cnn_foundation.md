@@ -1,167 +1,136 @@
-# Pretrained CNN foundation — Task 1.2 Stage 1A
+# Pretrained CNN model and training reference
 
-Stage 1A supplies three torchvision model adapters, separate 200-class heads,
-reusable encoder features, fine-tuning policies, and a thin connection to the
-existing classification data pipeline. It preserves the Task 1.1 source, audit,
-preparation, image, and sample contracts. This is a foundation for experiments;
-Stage 1B now supplies verified official weights, GPU preflight and classification
-training/recovery. Genuine canonical training results are still pending.
+Use the [pretrained handoff](pretrained_handoff.md) for the delivered ensemble,
+inference setup, measured results, evaluation and component Grad-CAM. This guide
+covers model construction, reusable features, data integration and training/recovery.
+It retains the Task 1.1 source, preparation, image and sample contracts.
 
 ## CPU development setup
 
-Use Python 3.12 and the pinned [training requirements](../requirements.txt), which
-include the classification requirements and `mlflow-skinny==3.17.2`.
-From the repository root, create and activate a virtual environment:
+The historical Stage 1A CPU environment (October 25, 2026) used Windows Python
+3.12.15, torch `2.14.1+cpu` and torchvision `0.29.1+cpu`. To reproduce that development
+setup, use Python 3.12 and the pinned [training requirements](../requirements.txt):
 
 ```bash
 python -m venv .venv
-```
-
-On Windows PowerShell, activate it with `.\.venv\Scripts\Activate.ps1`; on
-macOS/Linux, use `source .venv/bin/activate`. With that environment active:
-
-```bash
+# Windows PowerShell: .\.venv\Scripts\Activate.ps1
+# macOS/Linux: source .venv/bin/activate
 python -m pip install torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -r requirements.txt
 python -m pip check
 ```
 
-The established development environment is Windows Python 3.12.15 with torch
-`2.14.1+cpu` and torchvision `0.29.1+cpu`. These instructions describe CPU
-development. A cloud CUDA environment needs compatible accelerator builds and
-its own verification. Direct dependencies are pinned; this is not a complete
-transitive lockfile. The cloud notebook inspects and preserves its CUDA stack;
-do not apply these CPU installation commands to Colab/Kaggle.
-
-All examples run from the repository root with the environment active. Keep
-downloaded weights, source caches, prepared manifests, and experiment outputs out
-of Git. Installing dependencies and initially populating source caches require
-network access; the model example below explicitly avoids weight downloads.
+These CPU pins differ from the verified inference runtime in the main handoff.
+Preserve a working accelerator stack in Colab/Kaggle; do not apply these CPU
+installation commands there. Direct pins are not a complete transitive lockfile.
+All examples run from the repository root with the environment active. Keep weights,
+source caches, prepared manifests and experiment outputs outside Git. Initial cache
+population needs network access; `load_weights=False` examples avoid weight downloads.
 
 ## Model configuration and weight identity
 
-The public model API is in [src/models/pretrained.py](../src/models/pretrained.py).
-`ModelConfig` is an immutable validated dataclass:
+The [model API](../src/models/pretrained.py) uses an immutable, validated `ModelConfig`:
 
 ```python
 from src.models.pretrained import ModelConfig, get_model_spec
 
-config = ModelConfig(
-    architecture="convnext_tiny",
-    weights=None,
-    num_classes=200,
-    fine_tuning="frozen",
-    head_dropout=0.0,
-    freeze_bn_stats=True,
-)
-spec = get_model_spec(config.architecture)
-print(spec.weight_id)
-print(spec.native_preprocessing)
+config = ModelConfig(architecture="convnext_tiny", weights=None, num_classes=200,
+                     fine_tuning="frozen", head_dropout=0.0, freeze_bn_stats=True)
+spec = get_model_spec(config.architecture, config.weights)
+print(spec.weight_id, spec.native_preprocessing)
 ```
 
-`weights=None` selects the architecture's pinned pretrained enum. It does not
-request random initialization. Pass the exact qualified ID to make the same
-choice explicit. Unsupported architectures, weight IDs, class counts, policies,
-types, and invalid dropout values are rejected. The output class count is fixed
-at 200; labels retain the ordered source class mapping.
+`weights=None` selects the architecture's pinned pretrained identity. It does not
+request random initialization. Exact qualified IDs are also accepted. Unsupported
+architectures, IDs, class counts, policies, types and invalid dropout are rejected.
+The output has 200 classes in the original ordered source mapping.
 
-| Architecture key | Exact configured weight ID | Native resize / center crop | Native interpolation | Encoder channels | Output stride |
+| Architecture key | Exact configured weight ID | Native resize / crop | Interpolation | Encoder channels | Stride |
 | --- | --- | --- | --- | ---: | ---: |
 | `convnext_tiny` | `ConvNeXt_Tiny_Weights.IMAGENET1K_V1` | 236 / 224 | Bilinear | 768 | 32 |
 | `efficientnet_b3` | `EfficientNet_B3_Weights.IMAGENET1K_V1` | 320 / 300 | Bicubic | 1,536 | 32 |
 | `regnet_y_3_2gf` | `RegNet_Y_3_2GF_Weights.IMAGENET1K_V2` | 232 / 224 | Bilinear | 1,512 | 32 |
+| `convnextv2_base` | `timm/convnextv2_base.fcmae_ft_in22k_in1k_384` | 384 / 384 (squash) | Bicubic | 1,024 | 32 |
 
-The exact native preprocessing dictionary includes `resize_size`, `crop_size`,
-`interpolation`, `mean`, `std`, and `antialias`. It is JSON serializable and is
-recorded separately from the chosen baseline preprocessing. The native recipe
-does not run inside the model and must not be applied to already prepared
-tensors. In particular, EfficientNet-B3's native 300-pixel crop is not the
-224-pixel full-image baseline. All three native recipes use antialiasing and the
-fixed ImageNet normalization constants documented below.
+ConvNeXt-Tiny optionally accepts `facebook/convnext_tiny.in22k_ft_in1k_384`
+(`FB22K_WEIGHT_ID`), the paper-author ImageNet-22K → ImageNet-1K profile with a
+fresh 200-class head. Revision `32c741ba106f9e062174ef829354a16719c3dcac` and the
+full SHA-256 are checked before safe CPU loading. Conversion matched upstream timm
+features, embeddings and 1,000-class logits exactly at four CPU resolutions and on
+two real training images; production loading needs no timm. Native preprocessing
+is bicubic 384-pixel squashing; the chosen project recipe still preserves the whole
+image with white padding. Defaults stay unchanged. Use the same weight ID in
+`TrainConfig`/training JSON; a changed profile needs a fresh experiment.
 
-`create_pretrained_model(config, *, load_weights=True, progress=True)` requests
-the resolved enum through the native torchvision constructor. Download or load
-failures propagate; there is no random-weight fallback. The new task head is
-randomly initialized even when encoder weights are loaded.
+ConvNeXt-V2 Base uses pinned `timm==1.0.30` and `safetensors==0.8.0`. Its FCMAE →
+ImageNet-22K → ImageNet-1K artifact is revision-pinned and full-SHA-256 verified;
+native spatial/pooled outputs matched the adapter exactly. Install only those two
+packages when adding it to an existing GPU environment, retaining the Torch stack.
+The model card identifies CC-BY-NC-4.0 weights; preserve attribution. This adapter
+has separate real GPU resource checks and is outside the original three-model preflight.
 
-For offline construction, pass `load_weights=False` explicitly. This dispatches
-the constructor with `weights=None`, so the encoder is randomly initialized.
-The wrapper exposes `configured_weight_id`, `weights_loaded`, and
-`loaded_weight_id`. Offline construction records `False` and `None` for the last
-two fields while retaining the configured pinned ID. Its `config` and `spec`
-remain available for provenance. Offline construction, enum resolution, or a
-mocked constructor call does not establish compatibility with a downloaded
-pretrained checkpoint.
+`create_pretrained_model(config, *, load_weights=True, progress=True)` loads the
+resolved torchvision enum or pinned optional artifact. Load/download failures
+propagate; no random-weight fallback occurs. A new task head starts randomly.
+Explicit `load_weights=False` constructs a random encoder while retaining its
+configured identity. The wrapper exposes `config`, `spec`, `configured_weight_id`,
+`weights_loaded` and `loaded_weight_id`; the latter two are `False`/`None` for this
+offline construction. Configured identities or mocked construction alone do not
+verify downloaded-checkpoint compatibility.
+
+The JSON-serializable native recipe records `resize_size`, `crop_size`,
+`interpolation`, `mean`, `std` and `antialias` separately from chosen preprocessing.
+The three torchvision recipes use antialiasing and ImageNet normalization. They
+do not execute inside the model or apply to already prepared tensors; notably,
+EfficientNet-B3's native 300-pixel crop differs from the 224 full-image baseline.
 
 ## Classification and reusable encoder features
 
-Save this as a Python script at the repository root:
-
 ```python
 import torch
-
 from src.models.pretrained import ModelConfig, create_pretrained_model
 
-
-def main():
-    model = create_pretrained_model(
-        ModelConfig(architecture="convnext_tiny"),
-        load_weights=False,
-    ).eval()
-    images = torch.zeros(2, 3, 224, 224)
-    with torch.no_grad():
-        logits = model(images)
-        features = model.forward_features(images)
-    print(logits.shape)               # [2, 200]
-    print(features["spatial"].shape)  # [2, 768, 7, 7]
-    print(features["pooled"].shape)   # [2, 768]
-    print(model.gradcam_target_layer)
-
-
-if __name__ == "__main__":
-    main()
+model = create_pretrained_model(ModelConfig(architecture="convnext_tiny"),
+                                load_weights=False).eval()
+images = torch.zeros(2, 3, 224, 224)
+with torch.no_grad():
+    logits = model(images)
+    features = model.forward_features(images)
+print(logits.shape)               # [2, 200]
+print(features["spatial"].shape)  # [2, 768, 7, 7]
+print(features["pooled"].shape)   # [2, 768]
+print(model.gradcam_target_layer)
 ```
 
-`forward(images)` returns logits, without softmax. `forward_features(images)`
-returns exactly `spatial` and `pooled`, independently of the task head. At the
-224-pixel baseline, spatial tensors are NCHW `[B, D, 7, 7]`, pooled tensors are
-`[B, D]`, and logits are `[B, 200]` for all three adapters. The channel count `D`
-is shown in the table above. Other input sizes can change the spatial dimensions;
-stride 32 describes encoder downsampling rather than a guarantee of exact
-integer division for every input size.
+`forward` returns logits without softmax; `forward_features` returns exactly
+`spatial` and `pooled`, independently of the head. At 224 pixels, the three
+torchvision adapters produce NCHW `[B,D,7,7]` spatial features, `[B,D]` pooled
+features and `[B,200]` logits; `D` appears above. Other sizes change spatial shape;
+stride 32 does not guarantee exact integer division at every size.
 
-The adapter retains ConvNeXt's final encoder normalization. EfficientNet's
-pooled embedding is exposed before task-head dropout. The separate `head`
-applies the configured dropout and a linear projection to 200 classes. Calling
-`forward` and `forward_features` separately performs separate encoder passes;
-choose the interface needed by the consumer.
-
-Feature extraction does not unconditionally disable autograd. For a frozen
-encoder, set an input tensor's `requires_grad` when a gradient through the
-spatial representation is needed. `torch.no_grad()` is an explicit caller choice
-for inspection or inference; omit it when computing gradients.
+ConvNeXt retains final encoder normalization; EfficientNet pooled features precede
+head dropout. The separate `head` applies configured dropout and a linear projection.
+Calling both interfaces performs two encoder passes. Feature access preserves
+autograd: omit `no_grad()` for gradients and set the input's `requires_grad` when
+backpropagating through a frozen encoder's spatial representation.
 
 ## Fine-tuning policies and mode changes
 
-```python
-from src.models.pretrained import ModelConfig, create_pretrained_model
+Using the model above:
 
-model = create_pretrained_model(
-    ModelConfig(architecture="efficientnet_b3", fine_tuning="frozen"),
-    load_weights=False,
-)
+```python
 model.train()
 model.set_fine_tuning("partial")
 model.eval()
-model.train()  # Reapplies the selected policy and normalization constraints.
+model.train()  # Restores selected policy and normalization constraints.
 model.set_fine_tuning("full", freeze_bn_stats=False)
 print(sum(p.numel() for p in model.parameters() if p.requires_grad))
 model.set_fine_tuning("frozen", freeze_bn_stats=True)
 ```
 
-The head remains trainable under every policy. `frozen` freezes the encoder;
-`full` enables all encoder parameters. `partial` includes the final transition
-and stage, plus the final encoder projection or normalization where applicable:
+The head is always trainable. `frozen` freezes the encoder; `full` enables all its
+parameters. `partial` enables the final transition/stage and applicable final
+projection or normalization:
 
 | Architecture | Trainable encoder portion in `partial` | CAM target reference |
 | --- | --- | --- |
@@ -169,89 +138,72 @@ and stage, plus the final encoder projection or normalization where applicable:
 | EfficientNet-B3 | `encoder[7]`, `encoder[8]` | `encoder.8` |
 | RegNetY-3.2GF | `encoder.trunk_output.block4` | `encoder.trunk_output.block4` |
 
-Frozen encoder stages remain in evaluation mode while the model is training,
-including their stochastic layers. With `freeze_bn_stats=True` (the default),
-BatchNorm running statistics remain fixed even in trainable stages. Its affine
-parameters still follow the chosen parameter policy. With
-`freeze_bn_stats=False`, BatchNorm statistics may update in active stages during
-training; frozen stages remain in evaluation mode. `eval()` puts all modules in
-evaluation mode, and a later `train()` restores these policy constraints.
-Policy changes clear stale gradients on parameters that become frozen. If a
-future training loop changes which parameters an optimizer should own, update
-its parameter groups as part of that loop. `model.config` is replaced with an
-updated immutable configuration when the policy changes.
+Frozen stages, including stochastic layers, stay in evaluation mode during training.
+Default `freeze_bn_stats=True` fixes BatchNorm running statistics even in trainable
+stages; affine parameters follow the parameter policy. With `False`, active stages
+may update statistics while frozen stages remain in evaluation mode. `eval()` sets
+all modules to evaluation; subsequent `train()` reapplies these constraints.
+Policy changes clear newly frozen gradients and replace immutable `model.config`.
+Custom loops must also update optimizer groups when parameter ownership changes.
 
-`gradcam_target_layer` resolves an existing spatial module rather than
-registering a second copy. `get_model_spec(...).gradcam_target_path` records its
-path. This supports external hooks and gradient-based inspection; Stage 1A does
-not implement a CAM renderer, heatmap overlays, or an explainability experiment.
+`gradcam_target_layer` resolves an existing spatial module without registering a
+second copy; `spec.gradcam_target_path` records its path for external hooks.
+For the delivered component renderer, use the main handoff.
 
 ## Baseline preprocessing and normalization
 
-The data helper reuses [the classification transforms](classification_data.md#preprocessing-and-configurable-normalization).
-It decodes a source image lazily, applies EXIF orientation, composites transparency
-on white, and returns independent RGB8 pixels. It fits the complete image into a
-centered white 224×224 canvas using bilinear interpolation, with aspect ratio
-preserved within pixel rounding. It never crops by default or changes source
-assets. Only training adds a horizontal flip with probability 0.5; validation
-is deterministic.
+The [classification transforms](classification_data.md#preprocessing-and-configurable-normalization)
+lazily decode independent RGB8 pixels, apply EXIF orientation and composite
+transparency on white. The default fits the complete image, without cropping, into
+a centered white 224×224 canvas with bilinear interpolation and aspect ratio
+preserved within rounding. Source assets stay unchanged. Training alone adds a
+horizontal flip with probability 0.5; validation is deterministic.
 
 ```python
-import json
-
 from src.models.pretrained import ModelConfig
 from src.training.data import PreprocessingConfig
 
 config = ModelConfig(architecture="efficientnet_b3")
 default = PreprocessingConfig()
 plain = PreprocessingConfig(normalization=None)
-custom = PreprocessingConfig(
-    normalization=((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-)
+custom = PreprocessingConfig(normalization=((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)))
 train_transform = default.build_transform(training=True)
 val_transform = default.build_transform(training=False)
-print(json.dumps(default.describe(config), indent=2))
+print(default.describe(config))
 ```
 
-The default uses fixed ImageNet means `(0.485, 0.456, 0.406)` and standard
-deviations `(0.229, 0.224, 0.225)`. Normalization is applied once, after conversion
-to floating-point RGB in `[0, 1]`; disabled normalization leaves that range intact.
-A custom pair requires three finite means and three finite, positive standard
-deviations. `image_size` can explicitly change the output square size. Record
-the same chosen geometry and constants for training and evaluation. Estimate any
-future dataset-derived constants from the 4,794 derived training records only.
+Default ImageNet means are `(0.485, 0.456, 0.406)` and standard deviations
+`(0.229, 0.224, 0.225)`, applied once after float RGB conversion to `[0,1]`.
+Disabled normalization retains that range; custom pairs need three finite means
+and three finite positive standard deviations. `image_size` changes the square
+size explicitly. Match chosen geometry/constants across training and evaluation;
+estimate future dataset-derived constants from the 4,794 training records only.
 
-`describe(model_config)` records the actual baseline geometry, white padding,
-normalization, training flip probability, and validation behavior, alongside the
-native weight identity/recipe with `applied=False`. Changing architecture does
-not silently select its native crop recipe. The model expects already prepared
-tensors and does not normalize a second time.
+`describe(model_config)` records chosen geometry, padding, normalization, train
+flips and deterministic validation, alongside native identity/recipe with
+`applied=False`. Changing architecture never silently selects its native crop.
+The model consumes prepared tensors and never normalizes again. The delivered
+ensemble's selected image sizes and protocol are in the main handoff.
 
 ## Prepared Dataset and DataLoader integration
 
-Use a complete existing preparation. Either extract the separately distributed
-Task 1.1 delivery ZIP as described in [the EDA handoff](eda_handoff.md#reports-and-delivery-bundle)
-and select its `preparation/` folder, or reproduce it with
-`prepare_classification(audit_dir, output_dir, val_fraction=0.20, seed=42)` as
-described in [the classification guide](classification_data.md#reproduce-the-preparation).
-The ZIP's packaged audit summaries alone are not a complete row-level input for
-regenerating preparation. Prepared metadata does not include the source images;
-the pinned official-training source must also be cached or accessible.
+Use the complete Task 1.1 ZIP's `preparation/` directory from the
+[EDA handoff](eda_handoff.md#reports-and-delivery-bundle), or reproduce it with
+`prepare_classification(audit_dir, output_dir, val_fraction=0.20, seed=42)` as in
+the [classification guide](classification_data.md#reproduce-the-preparation).
+Packaged audit summaries alone cannot regenerate preparation. Metadata contains
+no images; the pinned official-training source must also be accessible/cached.
 
-Replace the explicit placeholder below with the directory containing
-`preparation.json` and `classification_manifest.jsonl`. Save it as a script so
-the main guard also supports Windows workers:
+Replace the placeholder with the directory containing `preparation.json` and
+`classification_manifest.jsonl`. Save as a script; the main guard supports Windows workers:
 
 ```python
 import random
 from pathlib import Path
-
 import numpy as np
 import torch
-
 from src.models.pretrained import ModelConfig, create_pretrained_model
-from src.training.data import PreprocessingConfig, make_pretrained_loaders
-
+from src.training.data import make_pretrained_loaders
 
 def main():
     seed = 42
@@ -260,24 +212,14 @@ def main():
     torch.manual_seed(seed)
     prepared_dir = Path("path/to/verified/preparation")  # Replace this placeholder.
     config = ModelConfig(architecture="convnext_tiny", fine_tuning="frozen")
-    preprocessing = PreprocessingConfig()
-    loaders = make_pretrained_loaders(
-        prepared_dir,
-        config,
-        preprocessing=preprocessing,
-        batch_size=2,
-        num_workers=0,
-        seed=seed,
-        pin_memory=False,
-    )
+    loaders = make_pretrained_loaders(prepared_dir, config, batch_size=2,
+                                     num_workers=0, seed=seed, pin_memory=False)
     batch = next(iter(loaders["val"]))
     model = create_pretrained_model(config, load_weights=False).eval()
     with torch.no_grad():
         logits = model(batch["image"])
-    print(batch["image"].shape, batch["label"].dtype)
-    print(batch["image_id"][0], logits.shape)
+    print(batch["image"].shape, batch["label"].dtype, batch["image_id"][0], logits.shape)
     print(len(loaders["train"].dataset), len(loaders["val"].dataset))
-
 
 if __name__ == "__main__":
     main()
@@ -286,53 +228,43 @@ if __name__ == "__main__":
 `make_pretrained_loaders(prepared_dir, model_config, *, preprocessing=None,
 source=None, batch_size=32, num_workers=0, seed=42, pin_memory=False)` returns
 `{"train": DataLoader, "val": DataLoader}`. It validates the complete preparation
-with `load_classification_manifest()` before opening a source or constructing
-Datasets. Without an injected `source`, it opens only `load_cub_split("train")`;
-both derived partitions use that official-training source. A supplied pinned
-`CubSource` supports already-open or offline sources and receives the same
-identity/mapping checks. No official-test source is fetched, and no split is
-created or silently changed.
+with `load_classification_manifest()` before opening sources/constructing datasets.
+By default it opens only `load_cub_split("train")` for both derived partitions.
+An injected pinned `CubSource` gets the same identity/mapping checks. No split is
+created or changed, and no official-test source is fetched.
 
-Samples retain exactly `image`, `label`, and `image_id`. Default batches contain
-`float32` `[B, 3, 224, 224]` images, `int64` `[B]` labels in 0–199, and a list of
-stable source IDs. Source class order comes from the original ordered
-`ClassLabel.names`, never sorted class names. IDs retain the
-`hf:<repository>@<revision>:<split>:<row>` namespace. Indexed reads validate source
-identity against the manifest and raise on failure rather than skip samples.
+Samples contain exactly `image`, `label`, `image_id`: default batches have float32
+`[B,3,224,224]` images, int64 `[B]` labels 0–199 and stable source-ID lists.
+Class order comes from original `ClassLabel.names`, never alphabetic sorting.
+IDs keep `hf:<repository>@<revision>:<split>:<row>`; indexed source/manifest
+mismatches raise instead of skipping records.
 
-The canonical preparation has **4,794 train, 1,200 validation, and 5,794 official
-test rows**, with no exclusions. Both exact-duplicate Pigeon Guillemot rows stay
-together in validation; neither is deleted. The helper consumes only train/val
-members and preserves all test assignments for later explicit final evaluation.
-Caption data, source assets, class IDs, and the seed-42 group-aware split remain
-unchanged. See [the preparation policy](classification_data.md#preparation-and-cleaning-policy)
-for complete eligibility and duplicate rules.
+Canonical seed-42 preparation has **4,794 train / 1,200 validation / 5,794 official
+test rows**, no exclusions and the unchanged ordered 200 classes. Both exact-duplicate
+Pigeon Guillemot rows stay together in validation. The helper consumes train/val
+only, preserving test assignments, captions, assets and class IDs. See the
+[preparation policy](classification_data.md#preparation-and-cleaning-policy).
 
-Only training shuffles. Each partition uses the existing loader's generator;
-workers seed Python and NumPy from PyTorch's worker seed. With zero workers,
-training augmentation uses the caller's RNG, so seed it before iteration as
-above. Recreate loaders and reset caller seeds to reproduce a run. Worker count,
-library versions, and iteration schedule remain part of reproducibility. The
-data helper supplies no checkpointed RNG restoration or training loop; the
-classification trainer below owns those responsibilities.
+Only train shuffles. Each partition uses its loader generator; workers seed Python
+and NumPy from PyTorch's worker seed. With zero workers, caller RNG controls train
+augmentation, so seed it before iteration as above. Recreate loaders/reset seeds to
+reproduce a run; versions, worker count and iteration schedule matter. The trainer
+below supplies checkpointed RNG restoration and the training loop.
 
 ## Classification training and recovery
 
-Run [02_train_convnext.ipynb](../notebooks/pretrained/02_train_convnext.ipynb) in an
-online Colab GPU runtime. Set the full published training PR SHA; use a fresh
-kernel and the verified canonical metadata ZIP. Setup verifies exact clean Git
-HEAD before project imports, preserves CUDA packages and global source/weight
-caches, installs only missing non-Torch dependencies and prints `pip check`
-conflicts. On Kaggle only, seven reviewed unrelated image-package relationships
-(BigFrames, Colab, Dopamine, Gradio and MoviePy owners) produce visible warnings
-without package repairs. Unknown relationships, malformed/process errors and
-failed required training imports remain fatal; Colab keeps strict checking.
-Metadata validation requires manifest SHA-256
-`a8bd05e048febf32df6d84a6e1bc16eddf6416be723e12dfc89621044962736b` before pixel access.
-Only the pinned official-training source supplies train/validation images.
+The [training notebook](../notebooks/pretrained/02_train_convnext.ipynb) and CLI
+share the API below. Cloud setup verifies exact clean published Git HEAD before
+imports, validates canonical metadata before pixels, preserves CUDA/global caches
+and installs only missing non-Torch dependencies. See the
+[cloud workflow](gpu_preflight.md#first-run-online-colab-gpu) for bootstrap details.
+Required manifest SHA-256:
+`a8bd05e048febf32df6d84a6e1bc16eddf6416be723e12dfc89621044962736b`.
+Only pinned official-training pixels supply train/validation data.
 
-The notebook loads `configs/pretrained_acceptance.json` through `TrainConfig.from_dict`
-and calls the same API as `python -m src.cli train --task classification`:
+```bash
+python -m src.cli train --task classification --config configs/pretrained_acceptance.json --prepared-dir outputs/classification-v1 --run-dir outputs/experiments/convnext-frozen-acceptance-v1 --device cuda --tracking mlflow
+```
 
 ```python
 import json
@@ -347,104 +279,78 @@ summary = run_training(
 )
 ```
 
-The initial acceptance freezes ConvNeXt-Tiny for two epochs with physical batch 8,
-accumulation 2, AdamW LR 0.001/decay 0.0001, seed 42, FP16, workers 0 and frozen
-BN statistics. Full-image white 224 fitting, ImageNet normalization and train-only
-flips are unchanged. Expect 600 successful updates only if all accumulation steps
-succeed; actual history and skipped AMP updates decide the count. This is a
-bounded acceptance experiment, with no tuned accuracy or duration promise.
+This bounded acceptance config freezes Tiny for two epochs: physical batch 8,
+accumulation 2, AdamW LR 0.001/decay 0.0001, seed 42, FP16, workers 0, frozen BN,
+224 full-image fitting, ImageNet normalization and train-only flips. Successful
+steps would yield 600 updates; actual history/skipped AMP updates are authoritative.
+It has no tuned-accuracy or duration promise; selected results are in the main handoff.
 
-Colab uses the stable Drive path
+Preserve the **entire run directory**. Colab's acceptance path is
 `/content/drive/MyDrive/featherlens/experiments/convnext-frozen-acceptance-v1`.
-Preserve the **entire run directory**. To recover, restore the same published code,
-canonical preparation and config, then set `resume=True` (CLI: `--resume`) and the
-same directory/tracking mode. One writer only. A fresh call refuses nonempty runs;
-changed configs need a new run name. `latest.pt` is authoritative at completed
-epochs, with optimizer/scaler/scheduler/RNG state; partial epochs are replayed.
-Before the first completed checkpoint, retain failure evidence and choose a new
-name. Completed runs regenerate reports without duplicate training. CPU recovery
-tests do not establish fresh-session GPU or cross-version restoration.
+Recover with the same published code, preparation, config, directory and tracking
+mode, setting `resume=True` / `--resume`. Use one writer. Fresh runs refuse nonempty
+directories; changed configs need a new name. `latest.pt` is authoritative at
+completed epochs, with optimizer/scaler/scheduler/RNG state; partial epochs replay.
+Before any completed checkpoint, retain failure evidence and choose a new name.
+Completed-run resume regenerates reports without duplicate training. CPU tests do
+not establish fresh-session GPU or cross-version restoration.
 
-`run_summary.json` records actual best/latest validation aggregates, successful and
-skipped updates, runtime, checkpoint hashes, reload proof and tracking ID/status.
+`run_training(..., initial_head="path/to/probe-head.pt")` starts fresh optimizer
+state/history from a frozen-probe classifier. It verifies the SHA sidecar,
+backbone profile/hash, manifest, class order and dimensions before pixels.
+`folded_raw_head` must include train-only feature standardization. Resume restores
+the full checkpoint and does not reread the probe artifact.
+
+`run_summary.json` records best/latest validation aggregates, successful/skipped
+updates, runtime, checkpoint hashes, reload proof and tracking identity/status.
 `history.json`/`.csv`, validation JSON, image-ID prediction CSVs and `run.log` remain
-independent of MLflow. A genuine training completion reloads the best checkpoint
-and verifies finite 200-class logits on a validation batch; terminal recovery can
-instead report `state_loaded_without_forward`. Inspect the actual proof and failures.
-Return `run_summary.json` and `evidence.zip`; the ZIP includes a SHA inventory but
-excludes checkpoints, datasets, caches and `mlruns`. Keep latest/best `.pt` files,
-their SHA sidecars and local tracking separately in Drive. JSON-only tracking is
-available through `tracking="json"` / `--tracking json`; MLflow uses the local
-`run_dir/mlruns` FileStore without a server or autologging. Logging failures are
-visible and can be reconciled with the same run ID on resume. FileStore artifact
-location relocation across machines is not guaranteed.
+independent of tracking. Genuine training completion reloads best and checks finite
+200-class validation logits; terminal recovery may report `state_loaded_without_forward`.
+Inspect the actual proof/failures. Return `run_summary.json` and `evidence.zip` (with
+SHA inventory); keep latest/best checkpoints, sidecars and `mlruns` separately.
+The ZIP excludes checkpoints, data, caches and `mlruns`.
 
-Kaggle online uses Internet + GPU, `CLOUD="kaggle"`, attached metadata under
-`/kaggle/input`, and runs under `/kaggle/working/experiments`. **Save Version** is
-required to retain session outputs; download and verify the entire saved run.
-No offline training package or cloud storage durability guarantee is provided.
+`tracking="json"` / `--tracking json` needs no MLflow. MLflow uses local
+`run_dir/mlruns` FileStore without server/autologging. Failures remain visible and
+can be reconciled under the same run ID on resume; cross-machine artifact-location
+relocation is not guaranteed. Kaggle uses Internet + GPU, `CLOUD="kaggle"`, metadata
+under `/kaggle/input` and runs under `/kaggle/working/experiments`; **Save Version**,
+then download/verify the entire saved run. No offline training package is verified.
+The training notebook warns for seven reviewed unrelated Kaggle package relationships
+(BigFrames, Colab, Dopamine, Gradio and MoviePy owners) without repairs; unknown
+relationships, malformed/process errors and required-import failures remain fatal.
+Colab keeps strict `pip check` behavior.
 
-Local trainer/checkpoint/controller tests use synthetic CPU fixtures; real CUB
-training metrics, actual updates, cloud checkpoints and fresh-session restoration
-remain **PENDING** until the user returns cloud evidence.
+Optional `label_smoothing` and brightness/contrast `color_jitter` default to zero
+and affect training only; jitter precedes fitting so padding stays white.
+`mixup_alpha=0.2` opts into within-microbatch image/target mixing. Default `0.0`
+preserves arithmetic and consumes no MixUp draws. Enabled train accuracy is
+`mixup_weighted`; validation retains hard labels and unchanged cross-entropy/metrics.
+Legacy checkpoints missing the field load disabled; changing it on resume is rejected.
 
 ## Provenance, verification, and limits
 
-Keep source revisions and ordered class mapping from the pinned source contract;
-keep manifest SHA-256, audit fingerprints, policy/split versions, counts, and seed
-from `preparation.json`. Record model configuration, exact configured and loaded
-weight identity, and `PreprocessingConfig.describe(...)` with future experiment
-artifacts. The preprocessing description is a recipe, not evidence of a weight
-download, source audit, or executed training run. Prepared validation checks
-metadata and stored audit evidence; it does not rehash every image during loading.
+Retain source revisions/class order, manifest SHA-256, audit fingerprints,
+policy/split versions, counts and seed from `preparation.json`, plus model config,
+configured/loaded weight identities and `PreprocessingConfig.describe(...)`.
+Recipes alone do not prove downloads, audits or executed training. Preparation
+validation checks metadata/stored audit evidence, not a fresh hash of every image.
 
-Stage 1A verification uses CPU execution, synthetic tensors/prepared fixtures,
-and explicit `load_weights=False`. Model tests cover 224-pixel shapes, separate
-feature access, gradients, CAM target hooks, parameter masks, BatchNorm buffers,
-repeated mode transitions, invalid configurations, offline construction, and
-constructor dispatch/error propagation. Data integration tests exercise the
-existing Dataset/DataLoader and preparation validator, fit geometry, normalization,
-IDs/labels, deterministic validation, and absence of an implicit test-source fetch.
-Mocked weight dispatch verifies delegation only. Randomly initialized execution
-does not verify real pretrained-checkpoint compatibility or classification quality.
+Historical Stage 1A verification on October 25, 2026 passed **614 tests, no failures
+or skips, in 90.57 seconds** on Windows CPU, with offline cached real data via
+`FEATHERLENS_PREPARED_DIR`. Real train/validation smoke checks used all three random
+encoders (`weights_loaded=False`, `loaded_weight_id=None`), retained 4,794/1,200
+members and reproduced validation pixels/logits with the feature shapes above.
+Compatibility checks passed for 53 dependencies without requirements changes.
+This establishes CPU integration, not pretrained/GPU quality. CPU model/data and
+synthetic trainer/checkpoint tests run with `python -m pytest -q`; the cached
+real-data opt-in otherwise skips without its populated source cache/prepared path.
+Task 1.1 evidence remains in its original handoffs.
 
-On October 25, 2026, the complete combined suite passed **614 tests with no
-failures or skips in 90.57 seconds** on Windows CPU. This included the existing
-cached real-data opt-in with `FEATHERLENS_PREPARED_DIR` set and Hugging Face in
-offline mode. A separate smoke check connected the existing data pipeline to all
-three adapters using real cached train/validation images and random encoder
-initialization:
-
-| Adapter | Spatial features | Pooled features | Logits |
-| --- | --- | --- | --- |
-| ConvNeXt-Tiny | `[2, 768, 7, 7]` | `[2, 768]` | `[2, 200]` |
-| EfficientNet-B3 | `[2, 1536, 7, 7]` | `[2, 1536]` | `[2, 200]` |
-| RegNetY-3.2GF | `[2, 1512, 7, 7]` | `[2, 1512]` | `[2, 200]` |
-
-The check retained 4,794 training and 1,200 validation records, opened only the
-official-training source, and reproduced validation pixels and logits. All
-three models recorded `weights_loaded=False` and `loaded_weight_id=None`.
-Compatibility checks passed for the 53 dependency packages without requirements
-changes. This verifies CPU integration with real data and random initialization;
-this historical Stage 1A check did not verify actual pretrained weights or GPU
-execution. Subsequent Stage 1B1 evidence below establishes those checks separately.
-
-Run the CPU suite from the active environment:
-
-```bash
-python -m pytest -q
-```
-
-The opt-in cached real-data test requires a populated pinned source cache and
-`FEATHERLENS_PREPARED_DIR`; otherwise it is skipped. Existing Task 1.1 real-data
-and EDA measurements remain documented in their original handoffs. They do not
-constitute a new pretrained-model or GPU experiment.
-
-Stage 1B1 returned T4 evidence verified all three official weights and all 36
-FP32/FP16 checks. A later targeted automatic-precision run passed 12/12 checks
-and storage readback; PR 13 merged as
-`6ad1adfe47f339414693c2034658a32bc6df2ca6`. See the
-[GPU evidence guide](gpu_preflight.md) for the preserved BF16 failure and limits.
-Preflight performed zero optimizer updates. Training/recovery/tracking now exist,
-while genuine canonical training evidence, prediction CLI, model comparison,
-search, CAM rendering, scratch CNNs and downstream tasks remain pending.
+Returned Stage 1B1 T4 evidence verified genuine official weights and 36/36 FP32/FP16
+checks; corrected automatic precision passed 12/12 plus storage readback before
+PR 13 merged as `6ad1adfe47f339414693c2034658a32bc6df2ca6`.
+The [GPU evidence guide](gpu_preflight.md) preserves BF16 failures, report hashes
+and limits. Preflight made zero optimizer updates. Later canonical CUDA training
+artifacts and the main handoff establish delivered results separately; scratch
+CNNs, automated search and downstream adaptation remain separate work.

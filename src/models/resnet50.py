@@ -98,7 +98,7 @@ class ResNet50Classifier(nn.Module):
         self.zero_grad(set_to_none=True)
         self.train(self.training)
 
-    def train(self, mode: bool = True) -> ResNet50Classifier: #mode is True for training 
+    def train(self, mode: bool = True) -> ResNet50Classifier: #mode is True for training
         """Apply training mode while preserving the encoder freezing policy."""
         super().train(mode)
         self.encoder.eval()
@@ -107,7 +107,7 @@ class ResNet50Classifier(nn.Module):
             module = self._finetune_module()
             module.train()
             for layer in module.modules():
-                if isinstance(layer, nn.BatchNorm2d): 
+                if isinstance(layer, nn.BatchNorm2d):
                     layer.eval() # keep running stats fixed
 
         return self

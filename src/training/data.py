@@ -2,11 +2,12 @@
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
 from torch.utils.data import DataLoader
-from torchvision.transforms import Compose
+from torchvision.transforms import ColorJitter, Compose
 
 from src.data.classification import CubClassificationDataset, make_classification_loaders
 from src.data.preparation import load_classification_manifest
@@ -18,7 +19,7 @@ from src.models.pretrained import ModelConfig, get_model_spec
 def _model_spec(config: ModelConfig):
     if not isinstance(config, ModelConfig):
         raise ValueError("model_config must be a validated ModelConfig")
-    return get_model_spec(config.architecture)
+    return get_model_spec(config.architecture, config.weights)
 
 
 @dataclass(frozen=True)
@@ -31,8 +32,13 @@ class PreprocessingConfig:
 
     image_size: int = 224
     normalization: tuple[Sequence[float], Sequence[float]] | None = IMAGENET_NORMALIZATION
+    color_jitter: float = 0.0
 
     def __post_init__(self) -> None:
+        if (type(self.color_jitter) not in (int, float) or not math.isfinite(self.color_jitter)
+                or not 0 <= self.color_jitter <= 0.5):
+            raise ValueError('color_jitter must be finite and between 0 and 0.5')
+        object.__setattr__(self, 'color_jitter', float(self.color_jitter) if self.color_jitter else 0.0)
         # Keep one validation authority for dimensions and mean/std semantics.
         classification_transform(training=False, image_size=self.image_size,
                                  geometry="fit", normalization=self.normalization)
@@ -40,9 +46,18 @@ class PreprocessingConfig:
             object.__setattr__(self, "normalization", tuple(tuple(values) for values in self.normalization))
 
     def build_transform(self, *, training: bool) -> Compose:
-        """Build existing PIL-to-tensor preprocessing; flips apply only in training."""
-        return classification_transform(training=training, image_size=self.image_size,
-                                        geometry="fit", normalization=self.normalization)
+        """Keep full-image geometry; optional exposure jitter applies only to training.
+
+        Jitter changes brightness/contrast, never hue or saturation. Apply it to
+        the original RGB image before fitting so added padding stays white.
+        Zero keeps the legacy transform and its RNG consumption unchanged.
+        """
+        transform = classification_transform(training=training, image_size=self.image_size,
+                                             geometry="fit", normalization=self.normalization)
+        if training and self.color_jitter:
+            transform.transforms.insert(0, ColorJitter(
+                brightness=self.color_jitter, contrast=self.color_jitter))
+        return transform
 
     def describe(self, model_config: ModelConfig) -> dict[str, Any]:
         """Describe the applied baseline separately from unapplied native weights."""
@@ -55,6 +70,8 @@ class PreprocessingConfig:
                 "image_size": self.image_size, "geometry": "fit",
                 "padding_rgb": [255, 255, 255], "normalization": normalization,
                 "train_horizontal_flip_probability": 0.5, "validation_augmentation": False,
+                "train_color_jitter": {"brightness": self.color_jitter, "contrast": self.color_jitter,
+                                       "saturation": 0, "hue": 0},
             },
             "native_weights": {
                 "weight_id": spec.weight_id,

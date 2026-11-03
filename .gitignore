@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv-*/
 venv/
 .env
 .env.*
@@ -43,5 +44,8 @@ dist/
 # project that u don't want on the commit history
 personal/
 
+# Local agent planning and execution notes
+/docs/superpowers/
+/.superpowers/
 # Personal experiment docs (resnet50 training notes)
 docs/resnet50_*.md

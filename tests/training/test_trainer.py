@@ -41,6 +41,127 @@ def test_train_uses_sample_weighted_loss_and_accuracy(api):
                                    'optimizer_updates': 2, 'skipped_updates': 0})
 
 
+@pytest.mark.parametrize('label_smoothing', [0.0, 0.1])
+def test_mixup_matches_explicit_soft_target_loss_gradient_and_weighted_accuracy(api, monkeypatch, label_smoothing):
+    # With lambda=.25 and a swap: inputs [[4,0],[0,2]] become [[1,1.5],[3,.5]].
+    samples = batch([[4, 0], [0, 2]], [0, 1], ['first', 'second'])
+    original_images, original_labels = samples['image'].clone(), samples['label'].clone()
+    model, reference = nn.Linear(2, 2, bias=False), nn.Linear(2, 2, bias=False)
+    with torch.no_grad():
+        model.weight.copy_(torch.eye(2)); reference.weight.copy_(torch.eye(2))
+    draws, permutations, observed_inputs = [], [], []
+    def beta(a, b):
+        assert a == b == 0.2
+        draws.append(True)
+        return 0.25
+    def permutation(count, *, device=None):
+        assert count == 2
+        permutations.append(True)
+        return torch.tensor([1, 0], device=device)
+    monkeypatch.setattr(np.random, 'beta', beta)
+    monkeypatch.setattr(torch, 'randperm', permutation)
+    hook = model.register_forward_pre_hook(lambda module, args: observed_inputs.append(args[0].detach().clone()))
+    mixed = torch.tensor([[1.0, 1.5], [3.0, 0.5]])
+    targets = torch.tensor([[0.25, 0.75], [0.75, 0.25]])
+    targets = targets * (1 - label_smoothing) + label_smoothing / 2
+    expected_loss = -(targets * reference(mixed).log_softmax(1)).sum() / 2
+    expected_loss.backward()
+    expected_weight = reference.weight.detach() - 0.1 * reference.weight.grad
+    result = api.train_epoch(model, [samples], torch.optim.SGD(model.parameters(), lr=0.1),
+                             'cpu', mixup_alpha=0.2, label_smoothing=label_smoothing)
+    hook.remove()
+    assert len(draws) == len(permutations) == len(observed_inputs) == 1
+    assert torch.equal(observed_inputs[0], mixed)
+    assert result['loss'] == pytest.approx(expected_loss.item())
+    torch.testing.assert_close(model.weight, expected_weight)
+    assert result['top1_accuracy'] == 0.75
+    assert result['accuracy_kind'] == 'mixup_weighted'
+    assert result['num_samples'] == 2 and result['optimizer_updates'] == 1
+    assert torch.equal(samples['image'], original_images) and torch.equal(samples['label'], original_labels)
+    assert samples['label'].dtype == torch.int64 and samples['image_id'] == ['first', 'second']
+    # Evaluation still uses the original hard labels and must never sample MixUp randomness.
+    def no_mixup(*args, **kwargs):
+        pytest.fail('Evaluation consumed MixUp randomness')
+    monkeypatch.setattr(np.random, 'beta', no_mixup)
+    monkeypatch.setattr(torch, 'randperm', no_mixup)
+    with torch.no_grad():
+        hard_loss = nn.functional.cross_entropy(nn.functional.linear(original_images, expected_weight), original_labels).item()
+    validated = api.evaluate(model, [samples], 'cpu', class_names=['a', 'b'])
+    assert validated['loss'] == pytest.approx(hard_loss)
+    assert [validated['predictions'][key]['true_label'] for key in ('first', 'second')] == [0, 1]
+
+
+def test_mixup_zero_preserves_legacy_numerics_keyset_and_all_rng_states(api, monkeypatch):
+    samples = [batch([[1, 2], [3, 1]], [0, 1]), batch([[2, 4]], [1])]
+    originals = [(value['image'].clone(), value['label'].clone(), list(value['image_id'])) for value in samples]
+    def no_draw(*args, **kwargs):
+        pytest.fail('Disabled MixUp consumed a random draw')
+    monkeypatch.setattr(np.random, 'beta', no_draw)
+    monkeypatch.setattr(torch, 'randperm', no_draw)
+    reference = nn.Sequential(nn.Dropout(0.25), nn.Linear(2, 2, bias=False))
+    initial = {key: value.clone() for key, value in reference.state_dict().items()}
+    random.seed(321); np.random.seed(321); torch.manual_seed(321)
+    optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+    optimizer.zero_grad(set_to_none=True)
+    loss_sum = correct = 0
+    for value in samples:
+        logits = reference(value['image'])
+        loss = nn.functional.cross_entropy(logits, value['label'], reduction='sum')
+        loss_sum += loss.item(); correct += int((logits.argmax(1) == value['label']).sum())
+        loss.backward()
+    for parameter in reference.parameters():
+        parameter.grad.div_(3)
+    optimizer.step(); optimizer.zero_grad(set_to_none=True)
+    expected = {'loss': loss_sum / 3, 'top1_accuracy': correct / 3, 'num_samples': 3,
+                'optimizer_updates': 1, 'skipped_updates': 0}
+    expected_python, expected_numpy, expected_torch = random.getstate(), np.random.get_state(), torch.get_rng_state()
+    for options in ({}, {'mixup_alpha': 0.0}):
+        model = nn.Sequential(nn.Dropout(0.25), nn.Linear(2, 2, bias=False))
+        model.load_state_dict(initial)
+        random.seed(321); np.random.seed(321); torch.manual_seed(321)
+        result = api.train_epoch(model, samples, torch.optim.SGD(model.parameters(), lr=0.1),
+                                 'cpu', accumulation_steps=2, **options)
+        assert result == expected
+        assert set(result) == {'loss', 'top1_accuracy', 'num_samples', 'optimizer_updates', 'skipped_updates'}
+        assert all(torch.equal(value, reference.state_dict()[key]) for key, value in model.state_dict().items())
+        assert random.getstate() == expected_python and torch.equal(torch.get_rng_state(), expected_torch)
+        actual_numpy = np.random.get_state()
+        assert actual_numpy[0] == expected_numpy[0] and np.array_equal(actual_numpy[1], expected_numpy[1])
+        assert actual_numpy[2:] == expected_numpy[2:]
+    for value, (images, labels, identifiers) in zip(samples, originals):
+        assert torch.equal(value['image'], images) and torch.equal(value['label'], labels) and value['image_id'] == identifiers
+
+
+def test_mixup_uneven_accumulation_matches_explicit_mixed_windows(api, monkeypatch):
+    samples = [batch([[1], [2], [4]], [0, 1, 0]), batch([[3], [5]], [1, 0]), batch([[6]], [1])]
+    lambdas, orders, counts = iter([0.2, 0.7, 0.4]), iter([[2, 0, 1], [1, 0], [0]]), []
+    def beta(a, b):
+        assert a == b == 0.2
+        return next(lambdas)
+    def permutation(count, *, device=None):
+        order = next(orders); assert count == len(order)
+        counts.append(count)
+        return torch.tensor(order, device=device)
+    monkeypatch.setattr(np.random, 'beta', beta); monkeypatch.setattr(torch, 'randperm', permutation)
+    model, reference = nn.Linear(1, 2, bias=False), nn.Linear(1, 2, bias=False)
+    with torch.no_grad():
+        model.weight.copy_(torch.tensor([[0.3], [-0.2]])); reference.weight.copy_(model.weight)
+    optimizer = torch.optim.SGD(reference.parameters(), lr=0.1)
+    windows = [(torch.tensor([[3.4], [1.2], [2.4], [3.6], [4.4]]),
+                torch.tensor([[1., 0.], [0.8, 0.2], [0.2, 0.8], [0.3, 0.7], [0.7, 0.3]])),
+               (torch.tensor([[6.]]), torch.tensor([[0., 1.]]))]
+    for images, targets in windows:
+        optimizer.zero_grad()
+        loss = -((targets * 0.9 + 0.05) * reference(images).log_softmax(1)).sum() / len(images)
+        loss.backward(); optimizer.step()
+    result = api.train_epoch(model, iter(samples), torch.optim.SGD(model.parameters(), lr=0.1), 'cpu',
+                             accumulation_steps=2, mixup_alpha=0.2, label_smoothing=0.1)
+    torch.testing.assert_close(model.weight, reference.weight)
+    assert counts == [3, 2, 1]
+    assert list(lambdas) == [] and list(orders) == []
+    assert result['num_samples'] == 6 and result['optimizer_updates'] == 2 and result['skipped_updates'] == 0
+
+
 def test_train_changes_parameters_by_the_mean_gradient(api):
     model = nn.Linear(1, 2, bias=False)
     nn.init.zeros_(model.weight)
@@ -54,7 +175,8 @@ def test_train_changes_parameters_by_the_mean_gradient(api):
     assert model.weight.grad is None
 
 
-def test_accumulation_matches_concatenated_windows_with_uneven_batches(api):
+@pytest.mark.parametrize('label_smoothing', [0.0, 0.1])
+def test_accumulation_matches_concatenated_windows_with_uneven_batches(api, label_smoothing):
     model = nn.Linear(1, 2, bias=False)
     nn.init.zeros_(model.weight)
     reference = nn.Linear(1, 2, bias=False)
@@ -66,14 +188,29 @@ def test_accumulation_matches_concatenated_windows_with_uneven_batches(api):
                            ([[3], [5], [2]], [0, 1, 0]), ([[6]], [1])]:
         expected_optimizer.zero_grad()
         values = batch(images, labels)
-        nn.functional.cross_entropy(reference(values['image']), values['label']).backward()
+        nn.functional.cross_entropy(reference(values['image']), values['label'],
+                                    label_smoothing=label_smoothing).backward()
         expected_optimizer.step()
     result = api.train_epoch(model, iter(loader), torch.optim.SGD(model.parameters(), lr=0.1),
-                             'cpu', accumulation_steps=2)
+                             'cpu', accumulation_steps=2, label_smoothing=label_smoothing)
     torch.testing.assert_close(model.weight, reference.weight)
     assert result['num_samples'] == 7
     assert result['optimizer_updates'] == 3
     assert result['skipped_updates'] == 0
+
+
+def test_smoothed_training_loss_keeps_validation_cross_entropy_unsmoothed(api):
+    model = nn.Linear(2, 2, bias=False)
+    with torch.no_grad():
+        model.weight.copy_(torch.eye(2))
+    samples = [batch([[math.log(3), 0]], [0], ['one'])]
+    trained = api.train_epoch(model, samples, torch.optim.SGD(model.parameters(), lr=0),
+                              'cpu', label_smoothing=0.2)
+    # Uniform smoothing gives target probabilities [0.9, 0.1], not [0.8, 0.2].
+    assert trained['loss'] == pytest.approx(0.9 * math.log(4 / 3) + 0.1 * math.log(4))
+    validated = api.evaluate(model, samples, 'cpu', class_names=['a', 'b'])
+    assert validated['loss'] == pytest.approx(math.log(4 / 3))
+    assert trained['top1_accuracy'] == validated['top1_accuracy'] == 1
 
 
 @pytest.mark.parametrize('overflow', [False, True])
@@ -320,12 +457,46 @@ def test_config_accepts_json_and_is_immutable(api):
     from dataclasses import FrozenInstanceError
     assert hasattr(api, 'TrainConfig'), 'TrainConfig is missing'
     config = api.TrainConfig.from_dict({'phases': [{'mode': 'partial', 'epochs': 3, 'lr': 0.02}],
-                                      'normalization': [[0.1, 0.2, 0.3], [1, 1, 1]]})
+                                      'normalization': [[0.1, 0.2, 0.3], [1, 1, 1]],
+                                      'label_smoothing': 0.1, 'color_jitter': 0.15, 'mixup_alpha': 0.2})
     assert config.phases == (api.Phase('partial', 3, 0.02),)
     assert config == api.TrainConfig.from_dict(json.loads(json.dumps(config.to_dict())))
     assert isinstance(config.normalization[0], tuple)
+    assert config.label_smoothing == 0.1 and config.color_jitter == 0.15 and config.mixup_alpha == 0.2
+    zero = api.TrainConfig.from_dict({'label_smoothing': 0, 'color_jitter': 0, 'mixup_alpha': 0})
+    assert type(zero.label_smoothing) is type(zero.color_jitter) is type(zero.mixup_alpha) is float
+    assert api.TrainConfig.from_dict({}).mixup_alpha == 0.0
     with pytest.raises(FrozenInstanceError):
         config.seed = 0
+
+
+def test_training_weight_profile_is_explicit_and_rejects_other_architectures(api, tmp_path):
+    from src.models.pretrained import FB22K_WEIGHT_ID
+    assert api.TrainConfig().weights == ModelConfig('convnext_tiny').weights
+    assert api.TrainConfig.from_dict({}).to_dict()['weights'] == ModelConfig('convnext_tiny').weights
+    assert api.TrainConfig(weights=FB22K_WEIGHT_ID).to_dict()['weights'] == FB22K_WEIGHT_ID
+    with pytest.raises(ValueError, match='weights'):
+        api.TrainConfig(architecture='efficientnet_b3', weights=ModelConfig('convnext_tiny').weights)
+    with pytest.raises(ValueError, match='model config'):
+        run_tiny(api, tmp_path / 'unused', tiny_config(api, weights=FB22K_WEIGHT_ID))
+
+
+def test_regularization_bounds_fail_before_training_side_effects(api):
+    for field, invalid in (('label_smoothing', [-0.1, 1, True, float('nan'), float('inf')]),
+                           ('color_jitter', [-0.1, 0.51, True, float('nan'), float('inf')]),
+                           ('mixup_alpha', [-0.1, True, float('nan'), float('inf')])):
+        for value in invalid:
+            with pytest.raises(ValueError, match=field):
+                api.TrainConfig(**{field: value})
+    model = nn.Linear(1, 2, bias=False).eval()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    original = model.weight.detach().clone()
+    with pytest.raises(ValueError, match='label_smoothing'):
+        api.train_epoch(model, [batch([[1]], [0])], optimizer, 'cpu', label_smoothing=True)
+    for invalid in (-0.1, True, float('nan'), float('inf')):
+        with pytest.raises(ValueError, match='mixup_alpha'):
+            api.train_epoch(model, [batch([[1]], [0])], optimizer, 'cpu', mixup_alpha=invalid)
+    assert not model.training and torch.equal(model.weight, original)
 
 
 @pytest.mark.parametrize('kwargs', [
@@ -342,12 +513,14 @@ def test_config_rejects_invalid_values(api, kwargs):
         api.TrainConfig.from_dict(kwargs)
 
 
+@pytest.mark.parametrize('mixup_alpha', [0.0, 0.2])
 @pytest.mark.parametrize('interrupt_after', [1, 2, 3])
-def test_fit_resume_matches_uninterrupted_rng_and_phase_state(api, tmp_path, interrupt_after):
+def test_fit_resume_matches_uninterrupted_rng_and_phase_state(api, tmp_path, interrupt_after, mixup_alpha):
     assert hasattr(api, 'fit'), 'fit is missing'
     from src.training.checkpoint import read_checkpoint
-    config = tiny_config(api, phases=(api.Phase('frozen', 2, 0.01), api.Phase('partial', 2, 0.003)),
-                         lr_decay=0.5)
+    config = tiny_config(api, phases=(api.Phase('frozen', 2, 0.01, backbone_lr=0.001),
+                                      api.Phase('partial', 2, 0.003, backbone_lr=0.0003)),
+                         lr_decay=0.5, selection_metric='val_macro_f1', mixup_alpha=mixup_alpha)
     def callback(record, validation):
         random.random()
         np.random.random()
@@ -370,6 +543,8 @@ def test_fit_resume_matches_uninterrupted_rng_and_phase_state(api, tmp_path, int
     split = read_checkpoint(tmp_path / 'split' / 'latest.pt')
     assert result['history'] == full['history']
     assert [row['learning_rate'] for row in result['history']] == [0.01, 0.005, 0.003, 0.0015]
+    assert [row['backbone_learning_rate'] for row in result['history']] == [None, None, 0.0003, 0.00015]
+    assert len(split['optimizer_state']['param_groups']) == 2
     assert result['optimizer_updates'] == 8
     for name, tensor in full['model_state'].items():
         assert torch.equal(tensor, split['model_state'][name]), name
@@ -378,6 +553,14 @@ def test_fit_resume_matches_uninterrupted_rng_and_phase_state(api, tmp_path, int
         assert state['step'].item() == 4  # two epochs in new phase, no carried Adam moments
     assert torch.equal(split['rng_state']['torch_cpu'], full['rng_state']['torch_cpu'])
     assert split['rng_state']['python'] == full['rng_state']['python']
+    a, b = split['rng_state']['numpy'], full['rng_state']['numpy']
+    assert a[0] == b[0] and torch.equal(a[1], b[1]) and a[2:] == b[2:]
+    assert all(torch.equal(state, full['rng_state']['loader_generators'][name])
+               for name, state in split['rng_state']['loader_generators'].items())
+    if mixup_alpha:
+        assert all(row['train_accuracy_kind'] == 'mixup_weighted' for row in result['history'])
+    else:
+        assert all('train_accuracy_kind' not in row for row in result['history'])
     assert result['validation'] == full['validation']
 
 
@@ -500,3 +683,74 @@ def test_fit_rejects_missing_manifest_identity_before_updating_weights(api, tmp_
         api.fit(model, tiny_loaders(), tiny_config(api), tmp_path,
                 data_identity={'class_names': CLASS_NAMES}, weight_provenance=PROVENANCE)
     assert torch.equal(before, model.head[1].weight)
+
+
+@pytest.mark.parametrize('value', [0, -0.1, True, float('nan'), float('inf')])
+def test_phase_rejects_invalid_backbone_lr(api, value):
+    with pytest.raises(ValueError, match='backbone_lr'):
+        api.Phase(backbone_lr=value)
+
+
+def test_config_rejects_unknown_selection_metric(api):
+    with pytest.raises(ValueError, match='selection_metric'):
+        tiny_config(api, selection_metric='val_accuracy')
+
+
+def test_fit_separate_rates_update_head_and_only_unfrozen_backbone(api, tmp_path, monkeypatch):
+    model = TinyAdapter(dropout=0)
+    model.encoder_norm = nn.LayerNorm(4)
+    model.forward = lambda images: model.head(model.encoder_norm(model.encoder(images)))
+    config = api.TrainConfig(amp='off', batch_size=7, accumulation_steps=1, weight_decay=0,
+                            phases=tuple(api.Phase(mode, 1, 0.01, backbone_lr=0.001)
+                                         for mode in ('frozen', 'partial', 'full')))
+    loaders = make_classification_loaders({'train': RandomSamples(True), 'val': RandomSamples(False)},
+                                         batch_size=7, seed=42)
+    train = api.train_epoch
+    seen = []
+    def inspect_updates(model, loader, optimizer, device, **kwargs):
+        groups = [{id(p) for p in group['params']} for group in optimizer.param_groups]
+        assert groups[0] == {id(p) for p in model.head.parameters()}
+        backbone = {id(p) for name, p in model.named_parameters()
+                    if not name.startswith('head.') and p.requires_grad}
+        assert groups[1:] == ([backbone] if backbone else [])
+        before = {name: p.detach().clone() for name, p in model.named_parameters()}
+        result = train(model, loader, optimizer, device, **kwargs)
+        for name, parameter in model.named_parameters():
+            if parameter.requires_grad:
+                expected = 0.01 if name.startswith('head.') else 0.001
+                assert (parameter - before[name]).abs().max().item() == pytest.approx(expected, abs=1e-5)
+            else:
+                assert torch.equal(parameter, before[name]), name
+        seen.append(model.config.fine_tuning)
+        return result
+    monkeypatch.setattr(api, 'train_epoch', inspect_updates)
+    result = api.fit(model, loaders, config, tmp_path, data_identity=DATA_IDENTITY,
+                     weight_provenance=PROVENANCE)
+    assert seen == ['frozen', 'partial', 'full']
+    assert [row['backbone_learning_rate'] for row in result['history']] == [None, 0.001, 0.001]
+
+
+def test_fit_f1_selects_earliest_best_and_uses_f1_delta_for_stopping(api, tmp_path, monkeypatch):
+    evaluate = api.evaluate
+    metrics = iter([(5.0, 0.4), (4.0, 0.5), (3.0, 0.5), (2.0, 0.52), (1.0, 0.51)])
+    def prescribed_metrics(*args, **kwargs):
+        result = evaluate(*args, **kwargs)
+        result['loss'], result['macro_f1'] = next(metrics)
+        return result
+    monkeypatch.setattr(api, 'evaluate', prescribed_metrics)
+    config = tiny_config(api, phases=(api.Phase(epochs=8),), selection_metric='val_macro_f1',
+                         patience=3, min_delta=0.05)
+    result = run_tiny(api, tmp_path, config)
+    assert result['epochs_completed'] == 5
+    assert result['stop_reason'] == 'early_stopping'
+    assert result['best_epoch'] == 4
+    assert result['best_loss'] == 1.0
+    assert [row['is_best'] for row in result['history']] == [True, True, False, True, False]
+    from src.training.checkpoint import read_checkpoint
+    best = read_checkpoint(tmp_path / 'best.pt')
+    latest = read_checkpoint(tmp_path / 'latest.pt')
+    assert best['epochs_completed'] == 4
+    assert best['best_epoch'] == 4
+    assert latest['early_stop_best'] == 0.5
+    assert latest['bad_epochs'] == 3
+    assert run_tiny(api, tmp_path, config, resume=True) == result
