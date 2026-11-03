@@ -9,17 +9,60 @@ import numpy as np
 import pytest
 import torch
 from torch import nn
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from src.data.classification import make_classification_loaders
 from src.models.finetuning import apply_parameter_policy, apply_training_policy
 from src.models.pretrained import ModelConfig
 
 
+NUM_CLASSES = 5
+
+
+class TinyNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 8, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(8, 16, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool2d(1),
+        )
+        self.head = nn.Linear(16, NUM_CLASSES)
+
+    def forward(self, images):
+        return self.head(self.features(images).flatten(1))
+
+
+def make_loader(count, *, batch_size=4, shuffle=False, seed=0, empty=False):
+    generator = torch.Generator().manual_seed(seed)
+    if empty:
+        images = torch.randn(0, 3, 32, 32, generator=generator)
+        labels = torch.zeros(0, dtype=torch.int64)
+    else:
+        images = torch.randn(count, 3, 32, 32, generator=generator)
+        labels = torch.randint(0, NUM_CLASSES, (count,), generator=generator)
+
+    def collate(batch):
+        return {"image": torch.stack([row[0] for row in batch]),
+                "label": torch.tensor([row[1] for row in batch])}
+
+    return DataLoader(TensorDataset(images, labels), batch_size=batch_size, shuffle=shuffle,
+                      generator=generator, collate_fn=collate)
+
+
 @pytest.fixture
 def api():
     assert importlib.util.find_spec('src.training.trainer') is not None, 'Training primitives are missing'
     return importlib.import_module('src.training.trainer')
+
+
+def make_config(api, **changes):
+    values = {"epochs": 2, "learning_rate": 1e-2, "seed": 42, "amp": False} | changes
+    return api.TrainingConfig(**values)
+
+
+def make_model():
+    torch.manual_seed(7)
+    return TinyNet()
 
 
 def batch(images, labels, ids=None):
@@ -247,7 +290,7 @@ def test_evaluate_hand_computed_metrics_and_serializable_predictions(api):
     model.offset.grad = torch.ones_like(model.offset)
     logits = [[6, 5, 4, 3, 2, 1], [6, 5, 4, 3, 2, 1],
               [5, 6, 4, 3, 2, 1], [5, 6, 4, 3, 2, 1], [6, 5, 1, 4, 3, 2]]
-    loader = [batch(logits[:3], [0, 0, 0], ['a', 'b', 'c']),
+    loader = [batch(logits[:3], [0, 0, 0], ['a', 'b', 'c']),\
               batch(logits[3:], [1, 2], ['d', 'e'])]
     result = api.evaluate(model, loader, 'cpu', class_names=list('ABCDEF'))
     assert result['loss'] == pytest.approx(math.log(sum(math.exp(-i) for i in range(6))) + 6 / 5)
@@ -398,7 +441,7 @@ def test_evaluate_rejects_nonfinite_confidence_after_float_conversion(api):
 
 CLASS_NAMES = [f'Bird {i}' for i in range(200)]
 DATA_IDENTITY = {'manifest_sha256': 'a' * 64, 'class_names': CLASS_NAMES}
-PROVENANCE = {'status': 'synthetic_fixture', 'architecture': 'convnext_tiny'}
+PROVENANCE = {'status': 'synthetic_fixture', 'architecture': 'convnext_tiny'}\
 
 
 class TinyAdapter(nn.Module):
@@ -683,6 +726,130 @@ def test_fit_rejects_missing_manifest_identity_before_updating_weights(api, tmp_
         api.fit(model, tiny_loaders(), tiny_config(api), tmp_path,
                 data_identity={'class_names': CLASS_NAMES}, weight_provenance=PROVENANCE)
     assert torch.equal(before, model.head[1].weight)
+
+
+@pytest.mark.parametrize("changes", [
+    {"epochs": 0}, {"epochs": True}, {"epochs": 2.0}, {"epochs": -1},
+    {"learning_rate": 0}, {"learning_rate": -1e-3}, {"learning_rate": float("nan")},
+    {"learning_rate": float("inf")}, {"learning_rate": True},
+    {"weight_decay": -0.1}, {"weight_decay": float("nan")}, {"weight_decay": True},
+    {"label_smoothing": 1}, {"label_smoothing": -0.1}, {"label_smoothing": float("nan")},
+    {"label_smoothing": True},
+    {"seed": -1}, {"seed": 2**32}, {"seed": True}, {"seed": 1.0},
+    {"amp": 1},
+    {"optimizer": "rmsprop"}, {"optimizer": 123},
+])
+def test_invalid_config_is_rejected_before_training(api, changes):
+    with pytest.raises((TypeError, ValueError)):
+        api.TrainingConfig(**changes)
+
+
+@pytest.mark.parametrize("opt_name", ["adam", "sgd", "adagrad"])
+def test_training_supports_all_configured_optimizers(api, opt_name):
+    model = make_model()
+    loaders = {"train": make_loader(8, shuffle=True, seed=1), "val": make_loader(4, seed=2)}
+    config = make_config(api, epochs=1, optimizer=opt_name)
+    result = api.train_classification(model, loaders, config)
+    assert len(result.reports) == 1
+    assert math.isfinite(result.reports[0].train_loss)
+
+
+def test_training_returns_history_best_epoch_and_portable_snapshot(api):
+    model = make_model()
+    loaders = {"train": make_loader(12, shuffle=True, seed=1), "val": make_loader(8, seed=2)}
+    result = api.train_classification(model, loaders, make_config(api))
+    assert [report.epoch for report in result.reports] == [1, 2]
+    for report in result.reports:
+        assert all(math.isfinite(value) for value in (
+            report.train_loss, report.val_loss, report.learning_rate))
+        assert 0.0 <= report.train_accuracy <= 1.0
+        assert 0.0 <= report.val_accuracy <= 1.0
+    assert result.best_val_accuracy == max(report.val_accuracy for report in result.reports)
+    assert result.best_epoch == max(result.reports, key=lambda report: report.val_accuracy).epoch
+    assert set(result.best_state) == set(model.state_dict())
+    assert all(tensor.device.type == "cpu" for tensor in result.best_state.values())
+    assert model.training is True
+
+
+def test_seeded_training_is_deterministic(api):
+    def run():
+        loaders = {"train": make_loader(12, shuffle=True, seed=1), "val": make_loader(8, seed=2)}
+        return api.train_classification(make_model(), loaders, make_config(api))
+    first = run()
+    second = run()
+    assert first.reports == second.reports
+    assert first.best_epoch == second.best_epoch
+    assert first.best_val_accuracy == second.best_val_accuracy
+
+
+def test_evaluation_rows_are_true_classes_so_one_true_class_fills_one_row(api):
+    model = make_model().eval()
+    images = torch.randn(10, 3, 32, 32, generator=torch.Generator().manual_seed(3))
+    dataset = TensorDataset(images, torch.full((10,), 2, dtype=torch.int64))
+    loader = DataLoader(dataset, batch_size=4, collate_fn=lambda batch: {
+        "image": torch.stack([row[0] for row in batch]),
+        "label": torch.tensor([row[1] for row in batch]),
+    })
+    loss, matrix = api.evaluate_classification(model, loader, device="cpu")
+    assert math.isfinite(loss)
+    assert matrix.shape == (NUM_CLASSES, NUM_CLASSES)
+    assert matrix.dtype == torch.int64
+    assert int(matrix.sum()) == 10
+    assert int(matrix[:2].sum()) == 0
+    assert int(matrix[2].sum()) == 10
+
+
+def test_on_epoch_receives_every_report_in_order(api):
+    received = []
+    loaders = {"train": make_loader(12, shuffle=True, seed=1), "val": make_loader(8, seed=2)}
+    result = api.train_classification(
+        make_model(), loaders, make_config(api), on_epoch=received.append,
+    )
+    assert received == list(result.reports)
+
+
+def test_invalid_loop_inputs_are_rejected(api):
+    model = make_model()
+    good = {"train": make_loader(4), "val": make_loader(4)}
+    with pytest.raises(TypeError):
+        api.train_classification(model, good, {"epochs": 2})
+    with pytest.raises(ValueError):
+        api.train_classification(model, {"train": good["train"]}, make_config(api))
+    with pytest.raises(TypeError):
+        api.train_classification(model, {"train": make_loader(4), "val": object()}, make_config(api))
+    with pytest.raises(TypeError):
+        api.train_classification(model, good, make_config(api), on_epoch="log")
+    with pytest.raises(TypeError):
+        api.train_classification(model, good, make_config(api), device=0)
+
+
+def test_empty_loaders_are_rejected_with_explicit_errors(api):
+    model = make_model()
+    empty = make_loader(0, empty=True)
+    with pytest.raises(ValueError, match="no batches"):
+        api.evaluate_classification(model, empty, device="cpu")
+    with pytest.raises(ValueError, match="no batches"):
+        api.train_classification(model, {"train": empty, "val": make_loader(4)}, make_config(api))
+
+
+def test_one_real_epoch_runs_on_the_scratch_model(api):
+    scratch = importlib.import_module("src.models.scratch")
+    torch.manual_seed(42)
+    model = scratch.create_scratch_model(scratch.ScratchConfig())
+    loaders = {"train": make_loader(8, batch_size=4, shuffle=True, seed=5),
+               "val": make_loader(4, batch_size=4, seed=6)}
+
+    class ScaledTiny(nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, images):
+            return self.inner(images)
+
+    config = make_config(api, epochs=1, learning_rate=1e-3, amp=True)
+    result = api.train_classification(ScaledTiny(model), loaders, config, device="cpu")
+    assert len(result.reports) == 1
 
 
 @pytest.mark.parametrize('value', [0, -0.1, True, float('nan'), float('inf')])

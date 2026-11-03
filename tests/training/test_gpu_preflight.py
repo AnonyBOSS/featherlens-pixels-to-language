@@ -1,4 +1,5 @@
 """Offline CPU contracts; mocks never establish executed cloud/GPU evidence."""
+import contextlib
 import importlib
 import json
 from pathlib import Path
@@ -8,6 +9,12 @@ from zipfile import ZipFile
 import pytest
 import torch
 from torch import nn
+
+
+def _warn_if_cpu():
+    if not torch.cuda.is_available():
+        return pytest.warns(UserWarning, match='pin_memory')
+    return contextlib.nullcontext()
 
 
 def api():

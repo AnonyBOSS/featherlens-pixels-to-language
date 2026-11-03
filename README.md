@@ -181,3 +181,7 @@ components and their CLIs remain future work.
 Data and research build on CUB-200-2011, its associated text descriptions,
 PyTorch/Torchvision and the cited pretrained model authors. See the task guides
 and retained experiment records for exact sources and verification limits.
+
+### Scratch classification commands
+
+See the [integrated scratch CLI guide](docs/classification_training_progress.md#integrated-cli-2026-11-03) for YAML training, tuning, checkpoint prediction and Grad-CAM. Final test evaluation requires `--allow-official-test`; portable pretrained inference uses `--bundle`, mutually exclusive with scratch `--checkpoint`.

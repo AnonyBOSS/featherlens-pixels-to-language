@@ -104,6 +104,7 @@ def test_dependency_setup_installs_only_missing_tracking_and_surfaces_conflicts(
     import importlib.util
     import sys
     import src.training.runtime  # Import before the deliberately simulated missing dependency.
+    import mlflow
 
     original_find = importlib.util.find_spec
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None if name == "mlflow" else original_find(name))

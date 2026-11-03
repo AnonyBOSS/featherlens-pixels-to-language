@@ -43,6 +43,9 @@ dist/
 # Folder to store personal notes/ files relating to the 
 # project that u don't want on the commit history
 personal/
+mise.toml
+
+
 
 # Local agent planning and execution notes
 /docs/superpowers/
