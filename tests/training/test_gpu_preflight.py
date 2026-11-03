@@ -175,6 +175,8 @@ def test_mocked_candidate_failures_preserve_later_coverage(canonical_fixture, tm
     runtime = api()
     facts = runtime.collect_runtime()
     facts['cuda']['available'] = True
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(torch.accelerator, 'is_available', lambda: False)
     monkeypatch.setattr(runtime, 'collect_runtime', lambda **kw: facts)
     monkeypatch.setattr(runtime, '_load_train_source', lambda **kw: pinned_source)
     def candidate(config, architecture, batches):
@@ -182,7 +184,9 @@ def test_mocked_candidate_failures_preserve_later_coverage(canonical_fixture, tm
             return {'architecture': architecture, 'status': 'failed', 'failures': [{'stage': 'weights', 'type': 'RuntimeError', 'message': 'synthetic failure'}]}
         return {'architecture': architecture, 'status': 'passed', 'failures': []}
     monkeypatch.setattr(runtime, '_run_candidate', candidate)
-    with _warn_if_cpu():
+    # The orchestration is simulated; loaders stay on CPU on every host.
+    monkeypatch.setattr(torch.accelerator, 'is_available', lambda: False)
+    with pytest.warns(UserWarning, match='pin_memory'):
         report = runtime.run_gpu_preflight(runtime.PreflightConfig(canonical_fixture, tmp_path / 'mock-only'))
     assert report['status'] == 'failed'
     assert [model['status'] for model in report['models']] == ['failed', 'passed', 'passed']
@@ -206,10 +210,13 @@ def test_diagnostic_subset_and_disabled_amp_cannot_be_full_acceptance(canonical_
     runtime = api()
     facts = runtime.collect_runtime()
     facts['cuda']['available'] = True
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(torch.accelerator, 'is_available', lambda: False)
     monkeypatch.setattr(runtime, 'collect_runtime', lambda **kw: facts)
     monkeypatch.setattr(runtime, '_load_train_source', lambda **kw: pinned_source)
     monkeypatch.setattr(runtime, '_run_candidate', lambda c, a, b: {'architecture': a, 'status': 'passed', 'failures': []})
-    with _warn_if_cpu():
+    monkeypatch.setattr(torch.accelerator, 'is_available', lambda: False)
+    with pytest.warns(UserWarning, match='pin_memory'):
         report = runtime.run_gpu_preflight(runtime.PreflightConfig(canonical_fixture, tmp_path / 'diagnostic', architectures=('convnext_tiny',), amp='off'))
     assert report['status'] == 'passed'
     assert report['acceptance_complete'] is False

@@ -80,6 +80,7 @@ datasets = {part: CubClassificationDataset(source, rows, partition=part,
             for part in ("train", "val")}
 loaders = make_classification_loaders(datasets, batch_size=64, num_workers=4, pin_memory=True)
 
+torch.manual_seed(42)  # Seed before constructing a fresh model.
 model = create_scratch_model(ScratchConfig(head_dropout=0.1))
 result = train_classification(model, loaders, TrainingConfig(epochs=30))
 print(result.best_epoch, result.best_val_accuracy)
@@ -121,3 +122,50 @@ In dependency order:
   own generator seeds from `make_classification_loaders`.
 - The official test split is never opened by the trainer; it stays reserved
   for final evaluation and benchmarking.
+
+
+## Integrated CLI (2026-11-03)
+
+The earlier progress snapshot above predates the completed scratch CLI, tuning,
+training plots and Grad-CAM implementation. Scratch commands use the YAML
+configuration and the existing `best_model.pt` checkpoint format:
+
+```bash
+python -m src.cli train --config configs/cls.yaml --device cuda
+python -m src.cli tune --config configs/cls.yaml
+python -m src.cli evaluate --config configs/cls.yaml --checkpoint outputs/classification_run/best_model.pt --split val
+python -m src.cli predict --checkpoint outputs/classification_run/best_model.pt --image bird.jpg
+python -m src.cli gradcam --config configs/cls.yaml --checkpoint outputs/classification_run/best_model.pt
+```
+
+Scratch model initialization now uses the configured training seed before creating
+parameters; tuning does the same with each trial seed. Existing saved parameters,
+model architecture and checkpoint fields are unchanged. This fix does not change
+weights in checkpoints produced by earlier runs.
+
+Only a frozen final evaluation protocol should select official test. It requires
+an explicit opt-in and selects the pinned official test source, while train and
+validation continue to select official train:
+
+```bash
+python -m src.cli test --config configs/cls.yaml --checkpoint outputs/classification_run/best_model.pt --allow-official-test
+# Equivalent explicit split:
+python -m src.cli evaluate --config configs/cls.yaml --checkpoint outputs/classification_run/best_model.pt --split test --allow-official-test
+```
+
+For portable pretrained inference, supply `--bundle` to `predict`, `evaluate` or
+`gradcam`; `--checkpoint` and `--bundle` are mutually exclusive. Bundle evaluation
+retains `--prepared-dir`, `--partition`, `--output-dir`, and the same
+`--allow-official-test` requirement. Bundle Grad-CAM retains `--image`,
+`--component` and `--output`. `export-classifier` packages the pretrained bundle.
+The separate ResNet50 command modules are unchanged.
+
+Pretrained JSON training uses the canonical multi-phase trainer and its
+`latest.pt`/`best.pt` recovery checkpoints, including optimizer, scheduler, RNG,
+class mapping and preparation identity. Its `--resume` and
+`--initial-checkpoint` are mutually exclusive. Scratch YAML `best_model.pt`
+contains model weights, `ScratchConfig` and best-validation metadata only; it
+cannot be passed to pretrained recovery or bundle loaders, and scratch training
+rejects both recovery flags. Scratch training does not enable MLflow tracking.
+No real training, GPU validation, or official test evaluation is implied by the
+offline integration checks.

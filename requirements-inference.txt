@@ -1,0 +1,13 @@
+# Inference/evaluation runtime verified with Windows Python 3.12.15.
+# Direct pins, not a complete transitive lockfile. No training/tracking/test extras.
+# Select matching CPU/CUDA torch + torchvision builds before installing this file.
+torch==2.11.0
+torchvision==0.26.0
+datasets==5.1.0
+numpy==2.5.4
+Pillow==13.0.0
+matplotlib==3.11.2
+fsspec==2026.7.0
+timm==1.0.30
+safetensors==0.8.0
+multiprocess==0.70.17

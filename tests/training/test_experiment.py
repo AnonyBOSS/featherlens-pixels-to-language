@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from zipfile import ZipFile
 
 import pytest
@@ -578,3 +579,251 @@ def test_completion_log_append_failure_records_failed_and_terminal_resume_repair
     assert client.get_run(run_id).info.status == 'FINISHED'
     assert checkpoints == {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in checkpoints}
     assert any(item['stage'] == 'finalization' for item in repaired['failures'])
+
+
+def test_initial_checkpoint_reuses_weights_with_fresh_training_state_and_provenance(setup, monkeypatch):
+    import src.training.trainer as trainer
+    import src.training.checkpoint as checkpoint
+    run(setup)
+    api, config, identity, parent_dir = setup
+    parent = parent_dir / 'best.pt'
+    # Preserve an actual legacy on-disk config without the newly optional keys.
+    legacy = torch.load(parent, weights_only=True, map_location='cpu')
+    legacy['training_config'].pop('selection_metric', None)
+    legacy['training_config'].pop('label_smoothing', None)
+    legacy['training_config'].pop('color_jitter', None)
+    assert legacy['training_config'].pop('mixup_alpha') == 0.0
+    legacy['training_config'].pop('weights', None)
+    for phase in legacy['training_config']['phases']:
+        phase.pop('backbone_lr', None)
+    torch.save(legacy, parent)
+    parent.with_suffix('.pt.sha256').write_text(hashlib.sha256(parent.read_bytes()).hexdigest() + '\n')
+    saved = read_checkpoint(parent)
+    assert saved['model_config']['fine_tuning'] == 'frozen'
+    assert saved['training_config']['mixup_alpha'] == 0.0
+    before = {path: path.read_bytes() for path in (parent, parent.with_suffix('.pt.sha256'))}
+    new_config = replace(config, phases=(Phase('partial', 1, 0.003, backbone_lr=0.00003),),
+                         selection_metric='val_macro_f1', label_smoothing=0.1, color_jitter=0.15, mixup_alpha=0.2)
+    original_epoch = trainer.train_epoch
+    original_loaders = api.make_pretrained_loaders
+    observed = []
+
+    def inspect_preprocessing(*args, **kwargs):
+        assert kwargs['preprocessing'].color_jitter == 0.15
+        return original_loaders(*args, **kwargs)
+
+    def inspect_epoch(model, loader, optimizer, *args, **kwargs):
+        assert model.config.fine_tuning == 'partial'
+        assert all(parameter.requires_grad for parameter in model.encoder.parameters())
+        assert not optimizer.state
+        assert [group['lr'] for group in optimizer.param_groups] == [0.003, 0.00003]
+        assert {id(p) for p in optimizer.param_groups[0]['params']} == {id(p) for p in model.head.parameters()}
+        assert {id(p) for p in optimizer.param_groups[1]['params']} == {id(p) for p in model.encoder.parameters()}
+        assert torch.equal(torch.get_rng_state(), torch.Generator().manual_seed(42).get_state())
+        assert kwargs['label_smoothing'] == 0.1 and kwargs['mixup_alpha'] == 0.2
+        for name, tensor in model.state_dict().items():
+            torch.testing.assert_close(tensor, saved['model_state'][name], rtol=0, atol=0)
+        observed.append(True)
+        return original_epoch(model, loader, optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(trainer, 'train_epoch', inspect_epoch)
+    monkeypatch.setattr(api, 'make_pretrained_loaders', inspect_preprocessing)
+    monkeypatch.setattr(api, 'build_verified_pretrained_model', forbidden)
+    monkeypatch.setattr(checkpoint, 'restore_rng_state', forbidden)
+    result = api.run_training(parent_dir.parent / 'prepared', parent_dir.parent / 'warmstart', new_config,
+                              initial_checkpoint=parent, device='cpu', tracking='json')
+    assert observed == [True]
+    assert result['epochs_completed'] == 1
+    assert result['optimizer_updates'] == 5
+    assert result['history'][0]['epoch'] == 1
+    assert result['history'][0]['train_accuracy_kind'] == 'mixup_weighted'
+    provenance = result['weight_provenance']
+    assert provenance['sha256'] == 'c' * 64
+    initial = provenance['initial_checkpoint']
+    assert initial['filename'] == 'best.pt'
+    assert initial['sha256'] == hashlib.sha256(before[parent]).hexdigest()
+    assert initial['epochs_completed'] == saved['epochs_completed']
+    assert initial['weight_provenance'] == saved['weight_provenance']
+    child = read_checkpoint(parent_dir.parent / 'warmstart' / 'latest.pt')
+    assert child['weight_provenance'] == provenance
+    assert child['training_config'] == new_config.to_dict()
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+    monkeypatch.setattr(api, 'make_pretrained_loaders', forbidden)
+    for changed in ({'label_smoothing': 0.2}, {'color_jitter': 0.2}, {'mixup_alpha': 0.3}):
+        with pytest.raises(ValueError, match='config'):
+            api.run_training(parent_dir.parent / 'prepared', parent_dir.parent / 'warmstart',
+                             replace(new_config, **changed), device='cpu', tracking='json', resume=True)
+
+
+@pytest.mark.parametrize('damage', ['identity', 'architecture', 'weights', 'head_dropout', 'freeze_bn_stats', 'tensor', 'corrupt'])
+def test_initial_checkpoint_rejects_incompatible_parent_before_pixels_or_updates(setup, monkeypatch, damage):
+    from src.training.checkpoint import save_checkpoint
+    run(setup)
+    api, config, identity, parent_dir = setup
+    parent = parent_dir / 'best.pt'
+    if damage == 'identity':
+        monkeypatch.setattr(api, 'validate_preflight_preparation', lambda path: dict(identity, class_names=list(reversed(identity['class_names']))))
+    elif damage in ('architecture', 'weights', 'head_dropout', 'freeze_bn_stats'):
+        from src.models.pretrained import FB22K_WEIGHT_ID
+        values = {'architecture': 'efficientnet_b3', 'weights': FB22K_WEIGHT_ID,
+                  'head_dropout': 0.4, 'freeze_bn_stats': False}
+        updates = {damage: values[damage]}
+        if damage == 'architecture':
+            updates['weights'] = None
+        config = replace(config, **updates)
+    elif damage == 'tensor':
+        payload = read_checkpoint(parent)
+        payload['model_state']['head.1.weight'] = torch.zeros(1)
+        save_checkpoint(parent, payload)
+    else:
+        parent.write_bytes(b'corrupt parent')
+    before = {path: path.read_bytes() for path in (parent, parent.with_suffix('.pt.sha256'))}
+    for name in ('make_pretrained_loaders', 'build_verified_pretrained_model', 'fit'):
+        monkeypatch.setattr(api, name, forbidden)
+    with pytest.raises(ValueError):
+        api.run_training(parent_dir.parent / 'prepared', parent_dir.parent / 'warmstart', config,
+                         initial_checkpoint=parent, device='cpu', tracking='json')
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+
+
+def test_initial_checkpoint_and_resume_are_mutually_exclusive_before_io(setup, monkeypatch):
+    api, config, _, directory = setup
+    for name in ('read_checkpoint', 'validate_preflight_preparation', 'make_pretrained_loaders'):
+        monkeypatch.setattr(api, name, forbidden)
+    with pytest.raises(ValueError, match='initial_checkpoint.*resume|resume.*initial_checkpoint'):
+        run(setup, resume=True, initial_checkpoint=directory / 'missing.pt')
+
+
+def test_explicit_fb_profile_propagates_to_loaders_builder_offline_reload_and_resume(setup, monkeypatch):
+    from src.models.pretrained import FB22K_WEIGHT_ID
+    api, config, _, directory = setup
+    config = replace(config, weights=FB22K_WEIGHT_ID, phases=(Phase(epochs=1),))
+    original_loaders, original_builder = api.make_pretrained_loaders, api.build_verified_pretrained_model
+    observed = []
+
+    def loaders(path, model_config, **kwargs):
+        assert model_config.weights == FB22K_WEIGHT_ID
+        observed.append('loaders')
+        return original_loaders(path, model_config, **kwargs)
+
+    def builder(model_config):
+        assert model_config.weights == FB22K_WEIGHT_ID
+        observed.append('builder')
+        return original_builder(model_config)
+
+    monkeypatch.setattr(api, 'make_pretrained_loaders', loaders)
+    monkeypatch.setattr(api, 'build_verified_pretrained_model', builder)
+    result = api.run_training('prepared', directory, config, device='cpu', tracking='json')
+    assert observed == ['loaders', 'builder']
+    assert result['checkpoint_reload']['status'] == 'forward_verified'
+    saved = read_checkpoint(directory / 'best.pt')
+    assert saved['model_config']['weights'] == saved['training_config']['weights'] == FB22K_WEIGHT_ID
+    for name in ('validate_preflight_preparation', 'make_pretrained_loaders', 'build_verified_pretrained_model'):
+        monkeypatch.setattr(api, name, forbidden)
+    with pytest.raises(ValueError, match='config'):
+        api.run_training('missing', directory, replace(config, weights=None),
+                         device='cpu', tracking='json', resume=True)
+    resumed = api.run_training('missing', directory, config, device='cpu', tracking='json', resume=True)
+    assert resumed['status'] == 'completed' and resumed['epochs_completed'] == 1
+
+
+def test_initial_head_transfers_only_weights_with_fresh_history_and_offline_resume(setup, monkeypatch):
+    from src.models.pretrained import FB22K_WEIGHT_ID
+    api, config, identity, directory = setup
+    config = replace(config, weights=FB22K_WEIGHT_ID, phases=(Phase(epochs=1),))
+    path = directory.parent / 'probe-head.pt'
+    head = {'weight': torch.full((200, 3), 0.125), 'bias': torch.arange(200, dtype=torch.float32) / 100}
+    artifact = {'profile': 'fixture/profile', 'weight_sha256': 'c' * 64,
+                'manifest_sha256': identity['manifest_sha256'], 'class_names': identity['class_names'],
+                'folded_raw_head': head, 'history': [{'epoch': 60}], 'best_epoch': 60}
+    torch.save(artifact, path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_suffix('.pt.sha256').write_text(digest)
+    monkeypatch.setattr(api, 'get_model_spec', lambda *a: SimpleNamespace(encoder_channels=3))
+    monkeypatch.setattr(api, 'resolve_weight_info', lambda c: {'source_profile': 'fixture/profile', 'hash_prefix': 'c' * 64})
+    original_fit = api.fit
+    observed = []
+
+    def inspect_fit(model, *args, **kwargs):
+        for key, value in head.items():
+            assert torch.equal(model.head[1].state_dict()[key], value)
+        assert kwargs['resume'] is False
+        proof = kwargs['weight_provenance']['initial_head']
+        assert proof['filename'] == path.name and proof['sha256'] == digest
+        observed.append(True)
+        return original_fit(model, *args, **kwargs)
+
+    monkeypatch.setattr(api, 'fit', inspect_fit)
+    result = api.run_training('prepared', directory, config, initial_head=path, device='cpu', tracking='json')
+    assert observed == [True]
+    assert result['epochs_completed'] == 1 and result['history'][0]['epoch'] == 1
+    saved = read_checkpoint(directory / 'latest.pt')
+    assert saved['weight_provenance']['initial_head']['sha256'] == digest
+    path.unlink()
+    path.with_suffix('.pt.sha256').unlink()
+    for name in ('fit', 'make_pretrained_loaders', 'build_verified_pretrained_model', 'validate_preflight_preparation'):
+        monkeypatch.setattr(api, name, forbidden)
+    resumed = api.run_training('missing', directory, config, device='cpu', tracking='json', resume=True)
+    assert resumed['status'] == 'completed' and resumed['epochs_completed'] == 1
+
+
+def test_initial_head_rejects_invalid_artifacts_and_conflicting_inputs_before_pixels(setup, monkeypatch):
+    api, config, identity, directory = setup
+    path = directory.parent / 'probe-head.pt'
+    monkeypatch.setattr(api, 'get_model_spec', lambda *a: SimpleNamespace(encoder_channels=3))
+    monkeypatch.setattr(api, 'resolve_weight_info', lambda c: {'source_profile': 'fixture/profile', 'hash_prefix': 'c' * 64})
+    for name in ('fit', 'make_pretrained_loaders', 'build_verified_pretrained_model'):
+        monkeypatch.setattr(api, name, forbidden)
+    changes = [{'profile': 'wrong'}, {'weight_sha256': 'd' * 64}, {'manifest_sha256': 'd' * 64},
+               {'class_names': list(reversed(identity['class_names']))},
+               {'folded_raw_head': {'weight': torch.zeros(200, 2), 'bias': torch.zeros(200)}},
+               {'folded_raw_head': {'weight': torch.zeros(200, 3, dtype=torch.float64), 'bias': torch.zeros(200)}},
+               {'folded_raw_head': {'weight': torch.full((200, 3), float('nan')), 'bias': torch.zeros(200)}},
+               {'folded_raw_head': {'weight': torch.zeros(200, 3)}}, {}]
+    for index, change in enumerate(changes):
+        artifact = {'profile': 'fixture/profile', 'weight_sha256': 'c' * 64,
+                    'manifest_sha256': identity['manifest_sha256'], 'class_names': identity['class_names'],
+                    'folded_raw_head': {'weight': torch.zeros(200, 3), 'bias': torch.zeros(200)}, **change}
+        torch.save(artifact, path)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest() if change else '0' * 64
+        path.with_suffix('.pt.sha256').write_text(digest)
+        with pytest.raises(ValueError, match='head'):
+            api.run_training('prepared', directory.parent / f'invalid-{index}', config,
+                             initial_head=path, device='cpu', tracking='json')
+    monkeypatch.setattr(api, 'validate_preflight_preparation', forbidden)
+    for options in ({'resume': True}, {'initial_checkpoint': 'parent.pt'}):
+        with pytest.raises(ValueError, match='initial_head'):
+            api.run_training('prepared', directory, config, initial_head=path,
+                             device='cpu', tracking='json', **options)
+
+
+def test_optional_backbone_lr_exports_and_tracks_across_frozen_and_legacy_rows(setup, monkeypatch):
+    pytest.importorskip('mlflow')
+    from mlflow.tracking import MlflowClient
+    from src.training.checkpoint import save_checkpoint
+    api, config, _, directory = setup
+    config = replace(config, phases=(Phase('frozen', 1, 0.001),
+                                     Phase('partial', 1, 0.001, backbone_lr=0.00003)),
+                     label_smoothing=0.1, color_jitter=0.15, mixup_alpha=0.2)
+    result = api.run_training('prepared', directory, config, device='cpu', tracking='mlflow')
+    client = MlflowClient(tracking_uri=(directory / 'mlruns').as_uri())
+    run_id = result['tracking']['run_id']
+    assert client.get_run(run_id).data.params['label_smoothing'] == '0.1'
+    assert client.get_run(run_id).data.params['color_jitter'] == '0.15'
+    assert client.get_run(run_id).data.params['mixup_alpha'] == '0.2'
+    assert client.get_run(run_id).data.params['weights'] == config.weights
+    assert [(point.step, point.value) for point in client.get_metric_history(run_id, 'backbone_learning_rate')] == [(2, 0.00003)]
+    for name in ('best.pt', 'latest.pt'):
+        payload = read_checkpoint(directory / name)
+        payload['history'][0].pop('backbone_learning_rate')
+        save_checkpoint(directory / name, payload)
+    for name in ('fit', 'make_pretrained_loaders', 'build_verified_pretrained_model', 'validate_preflight_preparation'):
+        monkeypatch.setattr(api, name, forbidden)
+    repaired = api.run_training('missing', directory, config, device='cpu', tracking='mlflow', resume=True)
+    assert repaired['status'] == 'completed'
+    assert repaired['tracking']['status'] == 'finished'
+    with (directory / 'history.csv').open(newline='') as stream:
+        rows = list(csv.DictReader(stream))
+    assert rows[0]['backbone_learning_rate'] == ''
+    assert float(rows[1]['backbone_learning_rate']) == 0.00003
+    assert [(point.step, point.value) for point in client.get_metric_history(run_id, 'backbone_learning_rate')] == [(2, 0.00003)]

@@ -1,4 +1,4 @@
-"""Verify pinned Torchvision artifacts against every tensor retained by our adapters.
+"""Verify pinned pretrained artifacts against every tensor retained by our adapters.
 
 Metadata resolution alone is not proof of loaded pretrained parameters. The verified
 builder checks the cached artifact hash, reads it independently with weights-only
@@ -17,13 +17,24 @@ from torch import Tensor, nn
 import torchvision
 from torchvision import models
 
-from src.models.pretrained import ModelConfig, PretrainedClassifier, create_pretrained_model
+from src.models.pretrained import (
+    FB22K_WEIGHT_ID, FB22K_WEIGHT_INFO, V2BASE_WEIGHT_ID, V2BASE_WEIGHT_INFO,
+    ModelConfig, PretrainedClassifier, convert_fb_convnext_tiny_state,
+    create_pretrained_model, load_safe_weight_state,
+)
 
 
 def resolve_weight_info(config: ModelConfig) -> dict:
-    """Resolve the existing config's pinned enum without downloading or reading cache."""
+    """Resolve the config's pinned artifact without downloading or reading cache."""
     if not isinstance(config, ModelConfig):
         raise TypeError("config must be a ModelConfig")
+    if config.weights in (FB22K_WEIGHT_ID, V2BASE_WEIGHT_ID):
+        info = FB22K_WEIGHT_INFO if config.weights == FB22K_WEIGHT_ID else V2BASE_WEIGHT_INFO
+        return {
+            "architecture": config.architecture, "weight_id": config.weights,
+            **info, "torch_version": str(torch.__version__),
+            "torchvision_version": str(torchvision.__version__),
+        }
     enum_name, member = config.weights.split(".")
     weight = getattr(getattr(models, enum_name), member)
     url = weight.url
@@ -79,9 +90,11 @@ def prepare_official_weight(config, *, offline=False, progress=True) -> dict:
 def _native_key(architecture: str, adapter_key: str) -> str:
     if adapter_key.startswith("encoder."):
         suffix = adapter_key.removeprefix("encoder.")
-        return suffix if architecture == "regnet_y_3_2gf" else "features." + suffix
+        return suffix if architecture in ("regnet_y_3_2gf", "convnextv2_base") else "features." + suffix
     if architecture == "convnext_tiny" and adapter_key.startswith("encoder_norm."):
         return "classifier.0." + adapter_key.removeprefix("encoder_norm.")
+    if architecture == "convnextv2_base" and adapter_key.startswith("encoder_norm."):
+        return "head.norm." + adapter_key.removeprefix("encoder_norm.")
     raise ValueError(f"unexpected retained adapter state: {adapter_key}")
 
 
@@ -109,7 +122,8 @@ def verify_backbone_state(model, state_dict) -> dict:
         raise TypeError("checkpoint state_dict must be a tensor mapping")
     _verify_head(model)
     architecture = model.config.architecture
-    head_prefix = {"convnext_tiny": "classifier.2", "efficientnet_b3": "classifier.1", "regnet_y_3_2gf": "fc"}[architecture]
+    head_prefix = {"convnext_tiny": "classifier.2", "efficientnet_b3": "classifier.1",
+                   "regnet_y_3_2gf": "fc", "convnextv2_base": "head.fc"}[architecture]
     head_shapes = {
         head_prefix + ".weight": (1000, model.spec.encoder_channels),
         head_prefix + ".bias": (1000,),
@@ -159,11 +173,13 @@ def build_verified_pretrained_model(config, *, offline=False, progress=True):
     """
     artifact = prepare_official_weight(config, offline=offline, progress=progress)
     try:
-        state_dict = torch.load(artifact["cache_path"], map_location="cpu", weights_only=True)
+        state_dict = load_safe_weight_state(artifact["cache_path"])
     except (OSError, EOFError, RuntimeError, pickle.UnpicklingError, ValueError, TypeError) as exc:
         raise ValueError("official checkpoint could not be safely loaded as weights-only CPU state") from exc
     if not isinstance(state_dict, Mapping):
         raise TypeError("official checkpoint state_dict must be a tensor mapping")
+    if config.weights == FB22K_WEIGHT_ID:
+        state_dict = convert_fb_convnext_tiny_state(state_dict)
     model = create_pretrained_model(config, load_weights=True, progress=progress)
     backbone = verify_backbone_state(model, state_dict)
     return model, artifact | {

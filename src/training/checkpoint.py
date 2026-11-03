@@ -34,7 +34,7 @@ def _json_value(value):
 
 def _validate(payload):
     """Check the small public format before any restoration or model construction."""
-    from src.training.pretrained_trainer import TrainConfig
+    from src.training.trainer import TrainConfig
     if not isinstance(payload, dict) or _REQUIRED - payload.keys():
         raise ValueError('Checkpoint schema has missing required fields')
     if type(payload['schema_version']) is not int or payload['schema_version'] != 1:
@@ -62,7 +62,8 @@ def _validate(payload):
         if (payload['epoch_in_phase'] > phase.epochs
                 or completed != sum(p.epochs for p in config.phases[:phase_index]) + payload['epoch_in_phase']):
             raise ValueError('Inconsistent checkpoint epoch progress')
-        if (model_config.architecture != config.architecture or model_config.fine_tuning != phase.mode
+        if (model_config.architecture != config.architecture or model_config.weights != config.weights
+                or model_config.fine_tuning != phase.mode
                 or model_config.head_dropout != config.head_dropout or model_config.freeze_bn_stats != config.freeze_bn_stats):
             raise ValueError('Checkpoint model config differs from training config')
         precision = payload['resolved_precision']
@@ -80,17 +81,20 @@ def _validate(payload):
             raise ValueError('Inconsistent checkpoint stop_reason')
         history = payload['history']
         if (not isinstance(history, list) or len(history) != completed
-                or [row['epoch'] for row in history] != list(range(1, completed + 1))\
+                or [row['epoch'] for row in history] != list(range(1, completed + 1))
                 or history[-1]['phase_index'] != phase_index
                 or history[-1]['epoch_in_phase'] != payload['epoch_in_phase']
                 or sum(row['optimizer_updates'] for row in history) != payload['optimizer_updates']
                 or any(row['optimizer_updates'] < 1 for row in history)):
             raise ValueError('Inconsistent checkpoint history')
+        selected = [row[config.selection_metric] for row in history]
+        optimum = max(selected) if config.selection_metric == 'val_macro_f1' else min(selected)
         if (payload['best_epoch'] > completed
                 or any(type(payload[key]) not in (int, float) or not math.isfinite(payload[key])
                        for key in ('best_loss', 'early_stop_best'))
                 or payload['best_loss'] != min(row['val_loss'] for row in history)
-                or history[payload['best_epoch'] - 1]['val_loss'] != payload['best_loss']
+                or any(type(value) not in (int, float) or not math.isfinite(value) for value in selected)
+                or payload['best_epoch'] != selected.index(optimum) + 1
                 or payload['validation']['loss'] != history[-1]['val_loss']):
             raise ValueError('Inconsistent checkpoint validation or best loss')
         for key in ('model_state', 'weight_provenance', 'data_identity', 'optimizer_state',
@@ -160,7 +164,7 @@ def read_checkpoint(path, *, expected_config=None, expected_data_identity=None) 
         raise ValueError('Cannot read safe checkpoint payload') from error
     payload = _validate(payload)
     if expected_config is not None:
-        from src.training.pretrained_trainer import TrainConfig
+        from src.training.trainer import TrainConfig
         expected = expected_config.to_dict() if isinstance(expected_config, TrainConfig) else TrainConfig.from_dict(expected_config).to_dict()
         if payload['training_config'] != expected:
             raise ValueError('Checkpoint training config mismatch')

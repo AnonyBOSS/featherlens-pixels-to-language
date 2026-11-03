@@ -19,7 +19,7 @@ from .tuning import (
 )
 
 # Pretrained model training
-from .pretrained_trainer import (
+from .trainer import (
     Phase,
     TrainConfig,
     evaluate as evaluate_pretrained,

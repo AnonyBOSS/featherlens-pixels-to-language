@@ -1,0 +1,69 @@
+{
+  "schema_version": "cnn-handoff-1.0",
+  "date": "2026-10-23",
+  "repository": "https://github.com/AnonyBOSS/featherlens-pixels-to-language",
+  "repository_main": "c979dc268c4191d938690c572f48ff9134cf9383",
+  "approved_artifact_snapshot": "5beecfaf4e965cf3feb1b9505631fa708593ba25",
+  "snapshot_note": "Later main changes only ignore personal/. Source, tests, docs and requirements are unchanged.",
+  "source_revisions": {
+    "test": "82447a42c5e05c7fe21cd36accfdf399148e8668",
+    "train": "bd3988995e6db193427255abdebd522afe24ce76"
+  },
+  "source_counts": {
+    "test": 5794,
+    "train": 5994
+  },
+  "policy_version": "classification-v1",
+  "split_version": "stratified-exact-group-v1",
+  "seed": 42,
+  "validation_fraction": 0.2,
+  "partition_counts": {
+    "excluded": 0,
+    "test": 5794,
+    "train": 4794,
+    "val": 1200
+  },
+  "manifest_sha256": "a8bd05e048febf32df6d84a6e1bc16eddf6416be723e12dfc89621044962736b",
+  "preparation_sha256": "31d24f34a4c5fd6ac2a56be9800834cc1fc8c922a931966b3df6d3487caa7b21",
+  "report_sha256": "de465c413f9a8e4db6edc6b4d27011196250a95b12df58521aaf6391102575ce",
+  "report_pages": 30,
+  "image_configuration": {
+    "native_policy": "exif-rgb8-white:v1",
+    "ICC_correction": false,
+    "geometry": "fit",
+    "size": [
+      224,
+      224
+    ],
+    "padding_RGB": [
+      255,
+      255,
+      255
+    ],
+    "centered": true,
+    "training_horizontal_flip_probability": 0.5,
+    "eval_augmentation": false,
+    "normalization": {
+      "default_mean": [
+        0.485,
+        0.456,
+        0.406
+      ],
+      "default_std": [
+        0.229,
+        0.224,
+        0.225
+      ],
+      "configurable": true,
+      "fitted_from_CUB": false
+    },
+    "previews": {
+      "normalization": null,
+      "flip_example_seed": 0,
+      "original_count": 12,
+      "processed_view_count": 24
+    }
+  },
+  "fitting_boundary": "Fit new data-derived preprocessing/vocabulary parameters using only the 4,794 derived training records.",
+  "original_delivery_zip_sha256": "a8fc99232fe39f6117ad7851049df687a65b33ad46ff5ce4313c283d8472f119"
+}

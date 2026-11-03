@@ -202,3 +202,72 @@ def test_read_requires_complete_validation_report_for_recovery(api, payload, tmp
     path.with_suffix('.pt.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest())
     with pytest.raises(ValueError, match='validation'):
         api.read_checkpoint(path)
+
+
+@pytest.mark.parametrize('mode', ['frozen', 'partial'])
+def test_schema_one_without_new_config_fields_resumes_legacy_optimizer(api, tmp_path, mode, monkeypatch):
+    from src.training.trainer import TrainConfig, Phase, fit
+    config = TrainConfig(amp='off', batch_size=3, head_dropout=0.25,
+                         phases=(Phase(mode, 2, 0.01),), lr_decay=0.5)
+    def interrupt(record, validation):
+        if record['epoch'] == 2:
+            raise RuntimeError('interrupted')
+    torch.manual_seed(19)
+    fit(TinyAdapter(), tiny_loaders(), config, tmp_path / 'full',
+        data_identity=DATA_IDENTITY, weight_provenance=PROVENANCE)
+    torch.manual_seed(19)
+    with pytest.raises(RuntimeError, match='interrupted'):
+        fit(TinyAdapter(), tiny_loaders(), config, tmp_path / 'legacy', on_epoch=interrupt,
+            data_identity=DATA_IDENTITY, weight_provenance=PROVENANCE)
+    path = tmp_path / 'legacy' / 'latest.pt'
+    legacy = api.read_checkpoint(path)
+    assert len(legacy['optimizer_state']['param_groups']) == 1
+    assert legacy['training_config'].pop('selection_metric') == 'val_loss'
+    assert legacy['training_config'].pop('label_smoothing') == 0.0
+    assert legacy['training_config'].pop('color_jitter') == 0.0
+    assert legacy['training_config'].pop('mixup_alpha') == 0.0
+    assert legacy['training_config'].pop('weights') == 'ConvNeXt_Tiny_Weights.IMAGENET1K_V1'
+    assert legacy['training_config']['phases'][0].pop('backbone_lr') is None
+    for row in legacy['history']:
+        row.pop('backbone_learning_rate')
+    torch.save(legacy, path)
+    path.with_suffix('.pt.sha256').write_text(hashlib.sha256(path.read_bytes()).hexdigest())
+    loaded = api.read_checkpoint(path, expected_config=config)
+    assert loaded['training_config'] == config.to_dict()
+    raw_bytes = path.read_bytes()
+    def offline_adapter(model_config, *, load_weights):
+        assert load_weights is False
+        model = TinyAdapter(dropout=model_config.head_dropout)
+        model.set_fine_tuning(model_config.fine_tuning, freeze_bn_stats=model_config.freeze_bn_stats)
+        return model
+    monkeypatch.setattr(api, 'create_pretrained_model', offline_adapter)
+    model, restored = api.load_model_checkpoint(path, expected_data_identity=DATA_IDENTITY)
+    assert restored['training_config']['mixup_alpha'] == 0.0 and not model.training
+    assert all(torch.equal(value, legacy['model_state'][name]) for name, value in model.state_dict().items())
+    assert path.read_bytes() == raw_bytes
+    resumed = fit(TinyAdapter(), tiny_loaders(), config, path.parent, resume=True,
+                  data_identity=DATA_IDENTITY, weight_provenance=PROVENANCE)
+    expected = api.read_checkpoint(tmp_path / 'full' / 'latest.pt')
+    assert resumed['best_epoch'] == expected['best_epoch']
+    assert resumed['history'][-1] == expected['history'][-1]
+    actual = api.read_checkpoint(path)
+    for name, tensor in expected['model_state'].items():
+        assert torch.equal(tensor, actual['model_state'][name]), name
+
+
+def test_checkpoint_rejects_later_tie_as_selected_best(api, payload, tmp_path):
+    payload['training_config']['phases'][0]['epochs'] = 2
+    payload['epochs_completed'] = payload['epoch_in_phase'] = 2
+    payload['optimizer_updates'] *= 2
+    payload['history'].append({**payload['history'][0], 'epoch': 2, 'epoch_in_phase': 2,
+                              'total_optimizer_updates': payload['optimizer_updates']})
+    payload['best_epoch'] = 2
+    with pytest.raises(ValueError, match='best|validation'):
+        api.save_checkpoint(tmp_path / 'late-tie.pt', payload)
+
+
+def test_checkpoint_rejects_mismatched_model_and_training_weight_profiles(api, payload, tmp_path):
+    from src.models.pretrained import FB22K_WEIGHT_ID
+    payload['training_config']['weights'] = FB22K_WEIGHT_ID
+    with pytest.raises(ValueError, match='model config'):
+        api.save_checkpoint(tmp_path / 'profile-mismatch.pt', payload)

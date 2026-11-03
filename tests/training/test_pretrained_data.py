@@ -30,6 +30,35 @@ def test_default_preprocessing_retains_all_content_and_normalizes_once():
     assert torch.allclose(tensor[:, 167, 223], (torch.tensor([0., 0., 1.]) - mean) / std)
 
 
+def test_optional_exposure_jitter_is_train_only_before_white_padding_and_zero_preserves_rng():
+    from PIL import Image
+    from src.data.transforms import classification_transform
+    api = data_api()
+    image = Image.new('RGB', (8, 4), (100, 50, 20))
+    image.paste((20, 80, 120), (4, 0, 8, 4))
+    enabled = api.PreprocessingConfig(16, None, color_jitter=0.2)
+    baseline = classification_transform(training=False, image_size=16, normalization=None)(image)
+    torch.manual_seed(0)
+    trained = enabled.build_transform(training=True)(image)
+    assert trained.shape == baseline.shape == (3, 16, 16)
+    assert not torch.equal(trained[:, 4:12], baseline[:, 4:12])
+    assert torch.equal(trained[:, :4], torch.ones(3, 4, 16))
+    assert torch.equal(trained[:, 12:], torch.ones(3, 4, 16))
+    assert not torch.equal(trained[:, 6, 0], trained[:, 6, -1])
+    state = torch.get_rng_state()
+    assert torch.equal(enabled.build_transform(training=False)(image), baseline)
+    assert torch.equal(torch.get_rng_state(), state)
+    torch.manual_seed(11)
+    default = api.PreprocessingConfig(16, None).build_transform(training=True)(image)
+    state = torch.get_rng_state()
+    torch.manual_seed(11)
+    old = classification_transform(training=True, image_size=16, normalization=None)(image)
+    assert torch.equal(default, old) and torch.equal(torch.get_rng_state(), state)
+    metadata = enabled.describe(model_config())['baseline']
+    assert metadata['train_color_jitter'] == {'brightness': 0.2, 'contrast': 0.2, 'saturation': 0, 'hue': 0}
+    assert metadata['validation_augmentation'] is False
+
+
 @pytest.mark.parametrize("kwargs", [
     {"image_size": True}, {"image_size": 0}, {"image_size": 16.5},
     {"normalization": False}, {"normalization": ((0, 0), (1, 1, 1))},
@@ -54,6 +83,17 @@ def test_metadata_separates_full_fit_baseline_from_b3_native_crop():
     assert metadata["native_weights"]["weight_id"] == "EfficientNet_B3_Weights.IMAGENET1K_V1"
     assert metadata["native_weights"]["preprocessing"]["crop_size"] == [300]
     assert metadata["native_weights"]["applied"] is False
+
+
+def test_explicit_fb_weight_metadata_keeps_full_image_geometry():
+    from src.models.pretrained import FB22K_WEIGHT_ID, ModelConfig
+    config = ModelConfig('convnext_tiny', weights=FB22K_WEIGHT_ID)
+    metadata = data_api().PreprocessingConfig().describe(config)
+    assert metadata['native_weights']['weight_id'] == FB22K_WEIGHT_ID
+    assert metadata['native_weights']['preprocessing']['crop_size'] == [384]
+    assert metadata['native_weights']['applied'] is False
+    assert metadata['baseline']['geometry'] == 'fit'
+    assert metadata['baseline']['padding_rgb'] == [255, 255, 255]
 
 
 def test_prepared_loaders_are_lazy_and_preserve_mapping_membership_and_batches(audited_prepared, pinned_source):

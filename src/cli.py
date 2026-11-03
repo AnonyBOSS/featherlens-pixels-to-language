@@ -8,7 +8,6 @@ from typing import Any
 
 from PIL import Image
 import torch
-import yaml
 
 from src.data.classification import CubClassificationDataset, make_classification_loaders
 from src.data.image_io import load_rgb
@@ -17,11 +16,12 @@ from src.data.source import load_cub_split
 from src.data.transforms import classification_transform
 from src.evaluation.metrics import confusion_matrix, summarize_classification
 from src.models.scratch import ScratchConfig, create_scratch_model
-from src.training.trainer import (
+from src.training.scratch_trainer import (
     TrainingConfig,
     evaluate_classification,
     train_classification,
 )
+from src.training.scratch_trainer import _seed_everything
 from src.training.tuning import compare_tuning, grid_search, random_search
 from src.visualization.gradcam import collect_gradcam_samples, plot_gradcam_grid
 from src.visualization.training_plots import (
@@ -32,6 +32,7 @@ from src.visualization.training_plots import (
 
 
 def _load_yaml_config(path: str | Path) -> dict[str, Any]:
+    import yaml
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -71,21 +72,25 @@ def _build_loaders_from_config(config: dict[str, Any]) -> tuple[dict[str, Any], 
 def _cmd_train(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     # If run_dir, prepared_dir or JSON config is supplied, route to pretrained experiment runner
-    if args.run_dir is not None or args.prepared_dir is not None or config_path.suffix == ".json":
+    if (getattr(args, "run_dir", None) is not None
+            or getattr(args, "prepared_dir", None) is not None or config_path.suffix == ".json"):
         from src.training.runtime import _failure
         try:
             from src.training.experiment import run_training
             config = json.loads(config_path.read_text(encoding="utf-8"))
-            device = args.device or "cuda"
-            prepared_dir = args.prepared_dir or Path("outputs/preparation")
-            run_dir = args.run_dir or Path("outputs/classification_run")
+            device = getattr(args, "device", None) or "cuda"
+            prepared_dir = getattr(args, "prepared_dir", None) or Path("outputs/preparation")
+            run_dir = getattr(args, "run_dir", None) or Path("outputs/classification_run")
+            initial_checkpoint = getattr(args, "initial_checkpoint", None)
+            options = ({"initial_checkpoint": initial_checkpoint} if initial_checkpoint is not None else {})
             summary = run_training(
                 prepared_dir,
                 run_dir,
                 config,
                 device=device,
-                resume=args.resume,
-                tracking=args.tracking,
+                resume=getattr(args, "resume", False),
+                tracking=getattr(args, "tracking", "mlflow"),
+                **options,
             )
             print(json.dumps(summary, allow_nan=False))
             return 0
@@ -96,6 +101,10 @@ def _cmd_train(args: argparse.Namespace) -> int:
             failure = _failure("cli", error)
             print(f"Training error: {failure['type']}: {failure['message']}", file=sys.stderr)
             return 1
+
+    # Scratch checkpoints contain weights only, so optimizer recovery is unavailable.
+    if getattr(args, "resume", False) or getattr(args, "initial_checkpoint", None) is not None:
+        raise ValueError("Scratch training does not support --resume or --initial-checkpoint")
 
     # Otherwise execute scratch baseline training workflow
     print(f"Loading configuration from {args.config}...")
@@ -110,9 +119,6 @@ def _cmd_train(args: argparse.Namespace) -> int:
         head_dropout=float(model_cfg_data.get("head_dropout", 0.1)),
         activation=str(model_cfg_data.get("activation", "relu")),
     )
-    print(f"Instantiating from-scratch ResNet ({model_config.activation} activation)...")
-    model = create_scratch_model(model_config)
-
     train_cfg_data = cfg.get("training", {})
     train_config = TrainingConfig(
         epochs=int(train_cfg_data.get("epochs", 20)),
@@ -124,7 +130,11 @@ def _cmd_train(args: argparse.Namespace) -> int:
         amp=bool(train_cfg_data.get("amp", True)),
     )
 
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    _seed_everything(train_config.seed)
+    print(f"Instantiating from-scratch ResNet ({model_config.activation} activation)...")
+    model = create_scratch_model(model_config)
+
+    device = torch.device(getattr(args, "device", None) or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Starting training on {device} using {train_config.optimizer} for {train_config.epochs} epochs...")
 
     def on_epoch(report):
@@ -244,6 +254,8 @@ def _cmd_gradcam(args: argparse.Namespace) -> None:
 
 
 def _cmd_evaluate(args: argparse.Namespace) -> None:
+    if args.split == "test" and not getattr(args, "allow_official_test", False):
+        raise ValueError("Evaluating official test requires --allow-official-test explicitly")
     print(f"Loading configuration from {args.config}...")
     cfg = _load_yaml_config(args.config)
     output_dir = Path(cfg.get("output_dir", "outputs/classification_run"))
@@ -265,7 +277,7 @@ def _cmd_evaluate(args: argparse.Namespace) -> None:
     data_cfg = cfg.get("data", {})
     prepared_dir = Path(data_cfg.get("prepared_dir", "outputs/classification-v1"))
     manifest = load_classification_manifest(prepared_dir)
-    source = load_cub_split("train")
+    source = load_cub_split("test" if split_name == "test" else "train")
 
     dataset = CubClassificationDataset(
         source,
@@ -328,61 +340,147 @@ def _cmd_predict(args: argparse.Namespace) -> None:
     print(f"Confidence: {confidence:.2%}")
 
 
+def _delivery_runtime():
+    import os
+    os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+    import torch
+    torch.set_num_threads(2)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    # Match the measured FP32 Base encoder: cuDNN may use TF32 kernels.
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+
+
+def _cmd_bundle(args: argparse.Namespace) -> dict[str, Any]:
+    _delivery_runtime()
+    from src.evaluation.inference import export_classifier_bundle, load_classifier
+    if args.command == 'export-classifier':
+        path=export_classifier_bundle(args.tiny_checkpoint,args.base_weights,args.base_head,args.output_dir)
+        result={'status':'exported','bundle':str(path)}
+    else:
+        classifier=load_classifier(args.bundle,device=(args.device or "cpu"))
+        from src.evaluation.classification import predict_image,evaluate_classifier
+        if args.command == 'predict':
+            result=predict_image(classifier,args.image,top_k=args.top_k)
+        elif args.command in ('evaluate', 'test'):
+            report=evaluate_classifier(classifier,args.prepared_dir,partition=args.split,
+                batch_size=args.batch_size,num_workers=args.num_workers,
+                allow_test=args.allow_official_test,output_dir=args.output_dir)
+            result={k:v for k,v in report.items() if k not in
+                ('predictions','per_class','confusion_matrix','class_names')}
+        else:
+            from src.data.image_io import load_rgb
+            from src.evaluation.gradcam import compute_gradcam,render_gradcam
+            if args.component not in classifier.models:
+                raise ValueError('Unknown component name in classifier bundle')
+            if args.output.exists() or args.output.with_suffix('.json').exists():
+                raise FileExistsError('Grad-CAM output already exists; preserve previous results')
+            prediction=predict_image(classifier,args.image)
+            target=prediction['class_id'] if args.target_class is None else args.target_class
+            with load_rgb({'path':str(args.image)}) as image:
+                recipe=classifier.preprocessing[args.component]
+                tensor=recipe.build_transform(training=False)(image).unsqueeze(0).to(classifier.device)
+                computed=compute_gradcam(classifier.models[args.component],tensor,target)
+                render_gradcam(image,computed['heatmap'],recipe.image_size,output_path=args.output)
+            result={k:v for k,v in computed.items() if k not in ('heatmap','logits')}
+            result.update(status='written',component=args.component,target_class_name=classifier.class_names[target],
+                component_prediction_name=classifier.class_names[computed['predicted_class']],
+                classifier_prediction=prediction,output=args.output.name,
+                interpretation='Raw component-score attribution; relative colors are not causal proof or ensemble contributions.')
+            args.output.with_suffix('.json').write_text(json.dumps(result,indent=2,allow_nan=False)+'\n',encoding='utf8')
+    return result
+
+
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="FeatherLens Multimodal Deep Learning CLI")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description="FeatherLens classification CLI")
+    commands = parser.add_subparsers(dest="command", required=True)
 
-    # 1. train
-    p_train = subparsers.add_parser("train", help="Train a model")
-    p_train.add_argument("--task", default="classification", choices=["classification"])
-    p_train.add_argument("--config", required=True, help="Path to YAML or JSON config")
-    p_train.add_argument("--prepared-dir", type=Path, default=None, help="Path to prepared split directory")
-    p_train.add_argument("--run-dir", type=Path, default=None, help="Path to run output directory")
-    p_train.add_argument("--device", default=None, help="Computation device (e.g., cpu, cuda)")
-    p_train.add_argument("--resume", action="store_true", help="Resume training from latest checkpoint")
-    p_train.add_argument("--tracking", choices=["mlflow", "json"], default="mlflow", help="Experiment tracking")
+    train = commands.add_parser("train", help="Train scratch YAML or pretrained JSON classification")
+    train.add_argument("--task", default="classification", choices=["classification"])
+    train.add_argument("--config", type=Path, required=True, help="Scratch YAML or pretrained JSON config")
+    train.add_argument("--prepared-dir", type=Path)
+    train.add_argument("--run-dir", type=Path)
+    train.add_argument("--device")
+    initialization = train.add_mutually_exclusive_group()
+    initialization.add_argument("--resume", action="store_true")
+    initialization.add_argument("--initial-checkpoint", type=Path,
+                                help="Initialize a fresh pretrained run from model weights only")
+    train.add_argument("--tracking", choices=["mlflow", "json"], default="mlflow")
 
-    # 2. tune
-    p_tune = subparsers.add_parser("tune", help="Run hyperparameter tuning (Grid & Random Search)")
-    p_tune.add_argument("--task", default="classification", choices=["classification"])
-    p_tune.add_argument("--config", default="configs/cls.yaml", help="Path to YAML config")
+    tune = commands.add_parser("tune", help="Run scratch Grid Search and Random Search")
+    tune.add_argument("--task", default="classification", choices=["classification"])
+    tune.add_argument("--config", default="configs/cls.yaml")
 
-    # 3. gradcam
-    p_cam = subparsers.add_parser("gradcam", help="Generate Grad-CAM explainability heatmaps")
-    p_cam.add_argument("--task", default="classification", choices=["classification"])
-    p_cam.add_argument("--config", default="configs/cls.yaml", help="Path to YAML config")
-    p_cam.add_argument("--checkpoint", default=None, help="Path to trained checkpoint")
+    export = commands.add_parser("export-classifier", help="Package trained Tiny and scaled Base for offline inference")
+    export.add_argument("--tiny-checkpoint", type=Path, required=True)
+    export.add_argument("--base-weights", type=Path, required=True)
+    export.add_argument("--base-head", type=Path, required=True)
+    export.add_argument("--output-dir", type=Path, required=True)
+    export.add_argument("--device", default="cpu")
 
-    # 4. predict
-    p_pred = subparsers.add_parser("predict", help="Predict class for a single image")
-    p_pred.add_argument("--task", default="classification")
-    p_pred.add_argument("--image", required=True, help="Path to input image")
-    p_pred.add_argument("--checkpoint", default=None, help="Path to model checkpoint")
-
-    # 5. evaluate / test
-    for cmd_name, help_text in [("evaluate", "Evaluate a trained checkpoint on val or test split"), ("test", "Alias for evaluate on test split")]:
-        p_eval = subparsers.add_parser(cmd_name, help=help_text)
-        p_eval.add_argument("--task", default="classification", choices=["classification"])
-        p_eval.add_argument("--config", default="configs/cls.yaml", help="Path to YAML config")
-        p_eval.add_argument("--checkpoint", default=None, help="Path to model checkpoint (default: best_model.pt)")
-        p_eval.add_argument("--split", default="test" if cmd_name == "test" else "val", choices=["train", "val", "test"], help="Dataset split to evaluate")
+    predict = commands.add_parser("predict", help="Classify one image from a scratch checkpoint or portable bundle")
+    cam = commands.add_parser("gradcam", help="Explain scratch validation samples or a bundle component")
+    evaluate_commands = []
+    for name in ("evaluate", "test"):
+        command = commands.add_parser(name, help="Evaluate a complete partition; official test requires explicit opt-in")
+        command.add_argument("--config", default="configs/cls.yaml")
+        command.add_argument("--split", "--partition", dest="split", choices=["train", "val", "test"],
+                             default="test" if name == "test" else "val")
+        command.add_argument("--prepared-dir", type=Path)
+        command.add_argument("--batch-size", type=int, default=8)
+        command.add_argument("--num-workers", type=int, default=0)
+        command.add_argument("--output-dir", type=Path)
+        command.add_argument("--allow-official-test", action="store_true",
+                             help="Only for an explicitly frozen final test protocol")
+        evaluate_commands.append(command)
+    for command in (predict, cam, *evaluate_commands):
+        command.add_argument("--task", default="classification", choices=["classification"])
+        inputs = command.add_mutually_exclusive_group()
+        inputs.add_argument("--checkpoint", type=Path, help="Scratch best_model.pt checkpoint")
+        inputs.add_argument("--bundle", type=Path, help="Portable pretrained classifier bundle")
+        command.add_argument("--device", help="Bundle default: cpu; scratch evaluation default: available device")
+    predict.add_argument("--image", type=Path, required=True)
+    predict.add_argument("--top-k", type=int, default=5)
+    cam.add_argument("--config", default="configs/cls.yaml")
+    cam.add_argument("--image", type=Path)
+    cam.add_argument("--component", help="Component name in the bundle, e.g. tiny or base")
+    cam.add_argument("--target-class", type=int)
+    cam.add_argument("--output", type=Path, help="Bundle PNG overlay path; JSON metadata is saved beside it")
 
     args = parser.parse_args(argv)
-    if args.command == "train":
-        return _cmd_train(args)
-    elif args.command == "tune":
-        _cmd_tune(args)
+    if getattr(args, "bundle", None) is not None:
+        required = (("prepared_dir", "output_dir") if args.command in ("evaluate", "test")
+                    else ("image", "component", "output") if args.command == "gradcam" else ())
+        missing = ["--" + name.replace("_", "-") for name in required if getattr(args, name) is None]
+        if missing:
+            parser.error("bundle mode requires " + ", ".join(missing))
+    try:
+        if args.command in ("evaluate", "test") and args.split == "test" and not args.allow_official_test:
+            raise ValueError("Evaluating official test requires --allow-official-test explicitly")
+        if args.command == "train":
+            return _cmd_train(args)
+        if args.command == "export-classifier" or getattr(args, "bundle", None) is not None:
+            print(json.dumps(_cmd_bundle(args), allow_nan=False))
+        elif args.command == "tune":
+            _cmd_tune(args)
+        elif args.command == "gradcam":
+            _cmd_gradcam(args)
+        elif args.command == "predict":
+            _cmd_predict(args)
+        elif args.command in ("evaluate", "test"):
+            _cmd_evaluate(args)
         return 0
-    elif args.command == "gradcam":
-        _cmd_gradcam(args)
-        return 0
-    elif args.command == "predict":
-        _cmd_predict(args)
-        return 0
-    elif args.command in ("evaluate", "test"):
-        _cmd_evaluate(args)
-        return 0
-    return 0
+    except KeyboardInterrupt:
+        message = ("Training interrupted; resume from the latest completed checkpoint."
+                   if args.command == "train" else "Classification operation interrupted.")
+        print(message, file=sys.stderr)
+        return 130
+    except Exception as error:
+        prefix = "Training" if args.command == "train" else "Classification"
+        print(f"{prefix} error: {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

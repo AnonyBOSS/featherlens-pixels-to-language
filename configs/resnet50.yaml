@@ -1,0 +1,39 @@
+experiment:
+  name: resnet50_transfer_learning
+  seed: 42
+
+model:
+  num_classes: 200
+  weights: IMAGENET1K_V2
+
+data:
+  prepared_dir: preparation
+  image_size: 224
+  geometry: fit
+  normalization: imagenet
+  batch_size: 32
+  num_workers: 0
+
+training:
+  # Requires a CUDA-enabled PyTorch installation before training.
+  device: cuda
+  optimizer: adamw
+  weight_decay: 0.0001
+
+  head:
+    epochs: 3
+    learning_rate: 0.001
+
+  finetune:
+    epochs: 15
+    encoder_learning_rate: 0.00001
+    classifier_learning_rate: 0.0001
+
+checkpoints:
+  # Upload each completed experiment's trained models to Google Drive manually.
+  local_root: outputs/resnet50
+  selection_metric: val_accuracy
+
+tracking:
+  backend: mlflow
+  local_dir: outputs/resnet50/mlruns

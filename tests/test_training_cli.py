@@ -58,3 +58,28 @@ def test_cli_invokes_shared_entry_point_and_returns_summary(monkeypatch, tmp_pat
                         '--prepared-dir', str(tmp_path / 'prepared'), '--run-dir', str(tmp_path / 'run'),
                         '--device', 'cpu', '--tracking', 'json', '--resume']) == 0
     assert json.loads(capsys.readouterr().out)['optimizer_updates'] == 3
+
+
+def test_cli_forwards_initial_checkpoint_to_shared_controller(monkeypatch, tmp_path, capsys):
+    from src import cli as module
+    received = {}
+    def training(prepared_dir, run_dir, config, **kwargs):
+        received.update(kwargs)
+        return {'status': 'completed'}
+    monkeypatch.setattr('src.training.experiment.run_training', training)
+    config = tmp_path / 'config.json'
+    config.write_text('{}')
+    parent = tmp_path / 'parent.pt'
+    assert module.main(['train', '--task', 'classification', '--config', str(config),
+                        '--prepared-dir', str(tmp_path / 'prepared'), '--run-dir', str(tmp_path / 'run'),
+                        '--device', 'cpu', '--tracking', 'json', '--initial-checkpoint', str(parent)]) == 0
+    assert received['initial_checkpoint'] == parent
+    assert received['resume'] is False
+
+
+def test_cli_rejects_initial_checkpoint_with_resume_before_reading_config(tmp_path):
+    result = cli('train', '--task', 'classification', '--config', tmp_path / 'missing.json',
+                 '--prepared-dir', tmp_path / 'prepared', '--run-dir', tmp_path / 'run',
+                 '--initial-checkpoint', tmp_path / 'parent.pt', '--resume')
+    assert result.returncode == 2
+    assert 'not allowed with argument' in result.stderr

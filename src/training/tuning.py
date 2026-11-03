@@ -11,7 +11,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from src.models.scratch import ScratchConfig, create_scratch_model
-from src.training.trainer import TrainingConfig, train_classification
+from src.training.scratch_trainer import TrainingConfig, _seed_everything, train_classification
 
 
 @dataclass(frozen=True)
@@ -62,8 +62,6 @@ def _run_trial(
         activation=params.get("activation", "relu"),
         head_dropout=params.get("head_dropout", 0.0),
     )
-    model = create_scratch_model(model_config)
-
     train_config = TrainingConfig(
         epochs=epochs,
         learning_rate=params.get("learning_rate", 3e-4),
@@ -72,6 +70,9 @@ def _run_trial(
         seed=seed,
         amp=False if device == "cpu" else True,
     )
+
+    _seed_everything(train_config.seed)
+    model = create_scratch_model(model_config)
 
     start_time = time.time()
     result = train_classification(model, loaders, train_config, device=device)
