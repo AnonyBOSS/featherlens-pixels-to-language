@@ -1,0 +1,30 @@
+{
+  "schema_version": "repository-preparation-inventory-1.0",
+  "files": [
+    {
+      "path": "classification_batch_example.py",
+      "bytes": 1491,
+      "sha256": "e29650bc722c5da1187fd369c08b00d5a460a09399e6575649ad3d9f467133d0"
+    },
+    {
+      "path": "classification_manifest.jsonl",
+      "bytes": 11305474,
+      "sha256": "a8bd05e048febf32df6d84a6e1bc16eddf6416be723e12dfc89621044962736b"
+    },
+    {
+      "path": "preparation.json",
+      "bytes": 16669,
+      "sha256": "31d24f34a4c5fd6ac2a56be9800834cc1fc8c922a931966b3df6d3487caa7b21"
+    },
+    {
+      "path": "provenance.json",
+      "bytes": 2078,
+      "sha256": "f350762b46e7c022b58d953a60f8e9d6210f52c3047e48d485a9e73c852bd95a"
+    },
+    {
+      "path": "README.md",
+      "bytes": 4345,
+      "sha256": "fa186490e1ebb5005202a1b06e218b1c5e9332ca8af097fe5295d5842a52d504"
+    }
+  ]
+}
