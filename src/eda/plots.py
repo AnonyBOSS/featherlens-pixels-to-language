@@ -1,21 +1,16 @@
-"""Matplotlib figures from an already saved training EDA report.
-
-This module only arranges reported counts, distributions, and summary markers.
-It never loads source records, decodes images, recomputes statistics, removes
-stopwords, or chooses model preprocessing. Figure helpers return an open figure
-owned by the caller; ``generate_training_figures`` saves and closes every figure.
-The caller selects a Matplotlib backend (for example MPLBACKEND=Agg).
-"""
+"""Matplotlib figure generation and atomic PNG/PDF bundle export from saved EDA reports."""
 
 import argparse
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 import json
 import math
+import os
 from pathlib import Path
+import re
+import shutil
+import tempfile
 import textwrap
 from typing import Any
-
-from .figure_export import save_figure_bundle
 
 
 _BLUE = "#2563a6"
@@ -43,15 +38,98 @@ _STYLE = {
 }
 
 
-def _pyplot():
-    # Keep importing this module independent of graphical backend availability.
+def save_figure_bundle(figures: Sequence[tuple[str, Callable]], output_dir: str | Path) -> list[Path]:
+    """Render all PNG/PDF pairs to a temp dir and publish atomically, rolling back on errors."""
     import matplotlib.pyplot as plt
 
+    figures = tuple(figures)
+    stems = [stem for stem, _ in figures]
+    if any(not isinstance(stem, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", stem) for stem in stems):
+        raise ValueError("Figure stems must be simple lowercase filenames")
+    if not stems or len(stems) != len(set(stems)):
+        raise ValueError("Figure stems must be nonempty and unique")
+    if any(not callable(create) for _, create in figures):
+        raise ValueError("Each figure needs a callable builder")
+    destination = Path(output_dir)
+    if destination.exists() and not destination.is_dir():
+        raise ValueError("output_dir must be a directory")
+    staging_parent = destination.absolute().parent
+    while not staging_parent.exists():
+        staging_parent = staging_parent.parent
+    if not staging_parent.is_dir():
+        raise ValueError("The existing output parent must be a directory")
+    staging = Path(tempfile.mkdtemp(prefix=".eda-figures-", dir=staging_parent)).resolve()
+    if staging.parent != staging_parent.resolve():
+        raise RuntimeError("Unexpected temporary figure directory location")
+    rendered, previous = staging / "rendered", staging / "previous"
+    names = [f"{stem}.{extension}" for stem in stems for extension in ("png", "pdf")]
+    retain_backups = False
+    try:
+        rendered.mkdir()
+        previous.mkdir()
+        for stem, create in figures:
+            before = set(plt.get_fignums())
+            try:
+                figure = create()
+                figure.savefig(rendered / f"{stem}.png", dpi=200, bbox_inches="tight")
+                figure.savefig(rendered / f"{stem}.pdf", bbox_inches="tight")
+            finally:
+                for identifier in set(plt.get_fignums()) - before:
+                    plt.close(identifier)
+        if any(not (rendered / name).is_file() or (rendered / name).stat().st_size == 0 for name in names):
+            raise OSError("All figure files must render successfully before publication")
+        existing = set()
+        for name in names:
+            target = destination / name
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                raise ValueError(f"Figure target must be a regular file: {target}")
+            if target.exists():
+                shutil.copy2(target, previous / name)
+                existing.add(name)
+        created_directories = []
+        parent = destination
+        while not parent.exists():
+            created_directories.append(parent)
+            parent = parent.parent
+        published = []
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                os.replace(rendered / name, destination / name)
+                published.append(name)
+        except BaseException as publication_error:
+            rollback_errors = []
+            for name in reversed(published):
+                try:
+                    if name in existing:
+                        os.replace(previous / name, destination / name)
+                    else:
+                        (destination / name).unlink()
+                except BaseException as rollback_error:
+                    rollback_errors.append(rollback_error)
+            for directory in created_directories:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            if rollback_errors:
+                retain_backups = True
+                raise RuntimeError(
+                    f"Figure publication failed and rollback was incomplete; prior files remain in {previous}"
+                ) from publication_error
+            raise
+        return [destination / f"{stem}.png" for stem in stems]
+    finally:
+        if not retain_backups:
+            shutil.rmtree(staging)
+
+
+def _pyplot():
+    import matplotlib.pyplot as plt
     return plt
 
 
 def _validate_training_report(report: Mapping[str, Any]) -> None:
-    """Check saved plot inputs and reconcile counts without fitting statistics."""
     def mapping(value, path):
         if not isinstance(value, Mapping):
             raise ValueError(f"{path} must be an object")
@@ -97,7 +175,7 @@ def _validate_training_report(report: Mapping[str, Any]) -> None:
     if report.get("schema_version") != "1.1":
         raise ValueError(
             "Plotting requires report schema_version '1.1'. Regenerate the report "
-            "with the current src.analysis.explore command; legacy reports do not "
+            "with the current src.eda.explore command; legacy reports do not "
             "contain the saved plotting distributions."
         )
     source = mapping(field(report, "source", "report"), "source")
@@ -248,7 +326,6 @@ def _context(report: Mapping[str, Any]) -> str:
 
 
 def _title(figure, report: Mapping[str, Any], title: str) -> None:
-    # Let constrained layout reserve space for the complete two-line heading.
     figure.suptitle(f"{title}\n{_context(report)}", fontsize=15, color=_INK)
 
 
@@ -276,7 +353,7 @@ def _bar_labels(axis, bars) -> None:
 
 
 def create_class_distribution_figure(report: Mapping[str, Any]):
-    """Plot all class counts by rank and readable largest/smallest examples."""
+    """Plot per-class counts by rank and the five most/least represented classes."""
     _context(report)
     plt = _pyplot()
     with plt.rc_context(_STYLE):
@@ -320,7 +397,7 @@ def create_class_distribution_figure(report: Mapping[str, Any]):
 
 
 def create_caption_length_figure(report: Mapping[str, Any]):
-    """Draw precomputed discrete length and per-image coverage distributions."""
+    """Plot word/character length histograms and per-image caption coverage."""
     _context(report)
     plt = _pyplot()
     with plt.rc_context(_STYLE):
@@ -376,7 +453,7 @@ def create_caption_length_figure(report: Mapping[str, Any]):
 
 
 def create_vocabulary_figure(report: Mapping[str, Any]):
-    """Display reported token frequencies, retaining stopwords and rare words."""
+    """Plot top-20 words and the Zipf rank-frequency curve."""
     _context(report)
     plt = _pyplot()
     with plt.rc_context(_STYLE):
@@ -416,7 +493,7 @@ def create_vocabulary_figure(report: Mapping[str, Any]):
 
 
 def create_caption_repetition_figure(report: Mapping[str, Any]):
-    """Show overlapping distinct-text scopes and texts shared across images."""
+    """Plot within/across-image repeated caption counts and top shared examples."""
     _context(report)
     plt = _pyplot()
     with plt.rc_context(_STYLE):
@@ -454,7 +531,7 @@ def create_caption_repetition_figure(report: Mapping[str, Any]):
 
 
 def generate_training_figures(report: Mapping[str, Any], output_dir: str | Path) -> list[Path]:
-    """Validate a saved training report, then publish four PNG/PDF pairs safely."""
+    """Validate the saved metadata/caption report and save the four PNG/PDF figure pairs."""
     _validate_training_report(report)
     figures = (
         ("training_class_distribution", create_class_distribution_figure),
@@ -468,7 +545,7 @@ def generate_training_figures(report: Mapping[str, Any], output_dir: str | Path)
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Regenerate figures from a JSON report without opening a data source."""
+    """Regenerate metadata/caption figures from a saved JSON report."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/eda/figures"))

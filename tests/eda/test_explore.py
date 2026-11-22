@@ -1,11 +1,9 @@
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-
 import pytest
-
-import src.analysis.explore as explore
-from src.analysis.explore import build_exploration_report, build_training_report, main
+import src.eda.explore as explore
+from src.eda.explore import build_exploration_report, build_training_report, main
 from src.data.source import parse_captions
 from src.data.source import ImageRecord, SourceSpec
 

@@ -1,11 +1,4 @@
-"""Training image EDA figures from saved measurements and supplied gallery pixels.
-
-Geometry includes every recorded original and oriented dimension pair, including
-failure rows and modes ineligible for RGB statistics. Appearance plots
-give each eligible image one observation; they never pool pixels or fit a policy.
-Gallery callbacks supply actual native oriented RGB views. This module does not
-decode files, convert modes, resize measurement arrays, or assign quality flags.
-"""
+"""Training image EDA figures and gallery sheets from saved image reports."""
 
 from collections.abc import Callable, Mapping, Sequence
 import math
@@ -17,8 +10,7 @@ import numpy as np
 
 from src.data.source import SourceSpec
 
-from .eda_plots import _BLUE, _GOLD, _INK, _MUTED, _STYLE, _TEAL, _count_axis, _empty, _pyplot
-from .figure_export import save_figure_bundle
+from .plots import _BLUE, _GOLD, _INK, _MUTED, _STYLE, _TEAL, _count_axis, _empty, _pyplot, save_figure_bundle
 
 
 _STATUSES = {"ok", "unsupported_mode", "row_error", "fetch_error", "decode_error"}
@@ -44,7 +36,6 @@ def _number(value: Any, label: str, *, maximum: float | None = None) -> float:
 
 
 def _rows(report: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """Validate plotting dependencies before calling the shared export helper."""
     try:
         if report["schema_version"] != "image-eda-1.0":
             raise ValueError("Image figures require schema_version 'image-eda-1.0'")
@@ -209,7 +200,7 @@ def _pixel_denominator(report) -> str:
 
 
 def create_image_dimensions_figure(report):
-    """Use all known original/oriented geometry, independently of RGB eligibility."""
+    """Plot image width/height scatter, aspect ratios, and megapixel histograms."""
     rows = _rows(report)
     original = [row for row in rows if row["original_width"] is not None]
     oriented = [row for row in rows if row["oriented_width"] is not None]
@@ -242,7 +233,7 @@ def create_image_dimensions_figure(report):
 
 
 def create_image_appearance_figure(report):
-    """Plot one saved scalar per eligible image, rather than pooled pixels."""
+    """Plot brightness, contrast, and saturation histograms across eligible images."""
     rows = _eligible(report)
     plt = _pyplot()
     with plt.rc_context(_STYLE):
@@ -264,7 +255,7 @@ def create_image_appearance_figure(report):
 
 
 def create_image_rgb_figure(report):
-    """Show native-image channel means on matched 0–1 channel axes."""
+    """Plot per-image R, G, and B channel mean histograms."""
     rows = _eligible(report)
     plt = _pyplot()
     with plt.rc_context(_STYLE):
@@ -286,12 +277,7 @@ def create_image_rgb_figure(report):
 
 
 def select_representative_rows(report, *, count: int = 6) -> list[Mapping]:
-    """Choose first source rows from evenly spaced observed class IDs.
-
-    These illustrative examples are deterministic, not a random or statistically
-    representative sample. At most one image per selected class group is returned;
-    paired-null class metadata forms an explicitly unassigned final group.
-    """
+    """Pick the first eligible image from ``count`` evenly spaced observed classes."""
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
         raise ValueError("Gallery count must be a positive integer")
     first_by_class = {}
@@ -306,7 +292,7 @@ def select_representative_rows(report, *, count: int = 6) -> list[Mapping]:
 
 
 def select_extreme_rows(report) -> list[tuple[str, str, Mapping]]:
-    """Select low/high appearance extrema; ties use source row and identity."""
+    """Pick the lowest/highest image for brightness, contrast, and saturation."""
     rows = _eligible(report)
     if not rows:
         return []
@@ -368,8 +354,8 @@ def create_image_extremes_figure(report, image_getter: Callable[[Mapping], np.nd
 
 
 def generate_image_figures(report, output_dir: str | Path, *, image_getter: Callable[[Mapping], np.ndarray]) -> list[Path]:
-    """Publish three statistical groups and two actual-pixel galleries together."""
-    _rows(report)  # Validate every plotting field before the export helper writes.
+    """Validate an image report and save all five dimension/appearance/gallery PNG/PDF pairs."""
+    _rows(report)
     if not callable(image_getter):
         raise ValueError("image_getter must supply actual source RGB arrays")
     return save_figure_bundle(

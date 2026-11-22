@@ -1,7 +1,7 @@
 from copy import deepcopy
 from pathlib import Path
-
 import matplotlib
+
 
 matplotlib.use("Agg")
 
@@ -9,11 +9,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from src.analysis.image_stats import measure_rgb_array
-from src.analysis.image_summary import summarize_image_measurements
+from src.eda.stats import measure_rgb_array
+from src.eda.images import summarize_image_measurements
 from src.data.source import SourceSpec
-import src.visualization.image_plots as image_plots
-from src.visualization.image_plots import (
+import src.eda.image_plots as image_plots
+from src.eda.image_plots import (
     create_image_appearance_figure,
     create_image_dimensions_figure,
     create_image_extremes_figure,

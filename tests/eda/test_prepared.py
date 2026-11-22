@@ -1,20 +1,17 @@
-"""Synthetic membership joins using real raw-report builders and injected verification."""
-
 from copy import deepcopy
 from hashlib import sha256
 from io import BytesIO
 import json
 import sys
 from types import SimpleNamespace
-
 from PIL import Image
 import pytest
-
-from src.analysis.explore_caption_details import build_caption_details_report
-from src.analysis.explore_images import build_image_report
-from src.analysis.prepared_eda import build_prepared_training_report
+from src.eda.captions import build_caption_details_report
+from src.eda.images import build_image_report
+from src.eda.prepared import build_prepared_training_report
 from src.data.source import parse_captions
 from src.data.source import ImageRecord, SourceSpec
+import src.eda.prepared as runner
 
 
 NAMES = ("Red bird", "Blue bird")
@@ -301,3 +298,34 @@ def test_class_count_distributions_preserve_zero_classes_and_reconcile_known_cou
         distribution = report["class_count_distributions"][scope]
         assert sum(row["class_count"] for row in distribution) == 3
         assert sum(row["images_per_class"] * row["class_count"] for row in distribution) == expected_images
+
+
+def test_cli_preserves_input_fingerprints_and_writes_before_optional_figures(monkeypatch, tmp_path):
+    image_path, caption_path = tmp_path / "images.json", tmp_path / "captions.json"
+    image_path.write_text('{"source":"images"}', encoding="utf-8")
+    caption_path.write_text('{"source":"captions"}', encoding="utf-8")
+    output = tmp_path / "report.json"
+    expected = {"population": {"derived_training_image_count": 3, "validation_image_count": 2}}
+    calls = []
+    def build(directory, *, image_report, caption_report):
+        calls.append((directory, image_report, caption_report))
+        return expected
+    monkeypatch.setattr(runner, "build_prepared_training_report", build)
+    runner.main(["--prepared-dir", str(tmp_path / "prepared"), "--image-report", str(image_path), "--caption-report", str(caption_path), "--output", str(output)])
+    actual = json.loads(output.read_text(encoding="utf-8"))
+    assert calls == [(tmp_path / "prepared", {"source": "images"}, {"source": "captions"})]
+    assert actual["input_report_sha256"] == {"images": sha256(image_path.read_bytes()).hexdigest(), "captions": sha256(caption_path.read_bytes()).hexdigest()}
+
+
+def test_invalid_integration_does_not_replace_existing_report(monkeypatch, tmp_path):
+    image_path, caption_path = tmp_path / "images.json", tmp_path / "captions.json"
+    image_path.write_text("{}", encoding="utf-8")
+    caption_path.write_text("{}", encoding="utf-8")
+    output = tmp_path / "report.json"
+    output.write_bytes(b"prior valid report")
+    def fail(*args, **kwargs):
+        raise ValueError("Invalid preparation")
+    monkeypatch.setattr(runner, "build_prepared_training_report", fail)
+    with pytest.raises(ValueError, match="Invalid preparation"):
+        runner.main(["--prepared-dir", str(tmp_path), "--image-report", str(image_path), "--caption-report", str(caption_path), "--output", str(output)])
+    assert output.read_bytes() == b"prior valid report"

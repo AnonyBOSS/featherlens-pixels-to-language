@@ -1,10 +1,9 @@
-"""Synthetic report-only checks for plot meaning, saving, and cleanup."""
-
 from copy import deepcopy
 import json
 from pathlib import Path
-
 import matplotlib
+from types import SimpleNamespace
+
 
 matplotlib.use("Agg")
 
@@ -12,7 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 import pytest
 
-from src.visualization.eda_plots import (
+from src.eda.plots import (
     create_caption_length_figure,
     create_caption_repetition_figure,
     create_class_distribution_figure,
@@ -20,8 +19,7 @@ from src.visualization.eda_plots import (
     generate_training_figures,
     main,
 )
-import src.visualization.eda_plots as eda_plots
-import src.visualization.figure_export as figure_export
+import src.eda.plots as eda_plots
 
 
 @pytest.fixture
@@ -181,7 +179,7 @@ def test_cli_reads_saved_report_without_fetching_source(report, tmp_path, monkey
     report_path = tmp_path / "report.json"
     report_path.write_text(json.dumps(report), encoding="utf-8")
     calls = []
-    monkeypatch.setattr("src.visualization.eda_plots.generate_training_figures", lambda loaded, output: calls.append((loaded, output)) or [])
+    monkeypatch.setattr("src.eda.plots.generate_training_figures", lambda loaded, output: calls.append((loaded, output)) or [])
     main(["--report", str(report_path), "--output-dir", str(tmp_path / "figures")])
     assert calls == [(report, tmp_path / "figures")]
 
@@ -347,7 +345,7 @@ def test_mid_publication_failure_rolls_back_only_owned_files(
     previous_figures = set(plt.get_fignums())
     stub_renderers(monkeypatch)
     monkeypatch.setattr(Figure, "savefig", lambda figure, path, **kwargs: Path(path).write_bytes(b"new bytes"))
-    real_replace = figure_export.os.replace
+    real_replace = eda_plots.os.replace
     publication_calls = []
 
     def fail_fourth_publication(source, destination):
@@ -357,7 +355,7 @@ def test_mid_publication_failure_rolls_back_only_owned_files(
                 raise OSError("simulated publication failure")
         return real_replace(source, destination)
 
-    monkeypatch.setattr(figure_export.os, "replace", fail_fourth_publication)
+    monkeypatch.setattr(eda_plots.os, "replace", fail_fourth_publication)
     with pytest.raises(OSError, match="simulated publication"):
         generate_training_figures(report, output)
     assert len(publication_calls) == 4
@@ -386,13 +384,13 @@ def test_successful_publication_replaces_bundle_and_preserves_unrelated_files(
         rendered.append(path.name)
 
     monkeypatch.setattr(Figure, "savefig", fake_save)
-    real_replace = figure_export.os.replace
+    real_replace = eda_plots.os.replace
 
     def publish_after_complete_render(source, destination):
         assert len(rendered) == 8
         return real_replace(source, destination)
 
-    monkeypatch.setattr(figure_export.os, "replace", publish_after_complete_render)
+    monkeypatch.setattr(eda_plots.os, "replace", publish_after_complete_render)
     paths = generate_training_figures(report, output)
     assert paths == [output / f"{stem}.png" for stem in _STEMS]
     for stem in _STEMS:
@@ -441,3 +439,241 @@ def test_valid_prefix_mismatch_and_empty_reports_can_publish(report, tmp_path, m
     assert len(paths) == 4
     assert all(path.exists() and path.with_suffix(".pdf").exists() for path in paths)
     assert list(tmp_path.glob(".eda-figures-*")) == []
+
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+import pytest
+
+from src.eda.captions import build_caption_details_report
+from src.data.source import parse_captions
+from src.data.source import ImageRecord, SourceSpec
+import src.eda.detail_plots as detail_plots
+from src.eda.detail_plots import (
+    create_caption_diversity_figure,
+    create_caption_language_figure,
+    create_class_caption_variation_figure,
+    generate_caption_detail_figures,
+)
+
+
+NAMES = ("Red bird", "Blue bird", "Uncaptioned bird", "Absent bird")
+
+
+def synthetic_source(*, empty=False):
+    spec = SourceSpec("synthetic/captions", "train", "test-revision")
+    records = []
+    examples = () if empty else (
+        (0, "red bird wing\nred bird wing"),
+        (1, "blue beak\nleft wing"),
+        (0, "!!!"),
+        (2, None),
+    )
+    for source_row, (class_id, description) in enumerate(examples):
+        identity = spec.image_id(source_row)
+        image = ImageRecord(identity, spec.repo_id, spec.revision, "train", source_row, source_row, f"bird-{source_row}.jpg", class_id, NAMES[class_id])
+        records.append((image, parse_captions(description, image_id=identity)))
+    return SimpleNamespace(spec=spec, class_names=NAMES, dataset=records, iter_records=lambda: iter(records))
+
+
+@pytest.fixture
+def caption_report():
+    return build_caption_details_report(synthetic_source(), expected_records=4)
+
+
+def test_language_bars_use_saved_nonempty_caption_prevalence_and_top_term_labels(caption_report):
+    original = deepcopy(caption_report)
+    figure = create_caption_language_figure(caption_report)
+    by_category = {row["category"]: row for row in caption_report["caption_details"]["term_prevalence"]}
+
+    for axis, category in zip(figure.axes, ("color", "anatomy", "direction")):
+        selected = sorted((row for row in by_category[category]["terms"] if row["caption_count"]), key=lambda row: (-row["caption_count"], row["term"]))[:10]
+        assert [label.get_text() for label in axis.get_yticklabels()] == [row["term"] for row in selected]
+        assert [bar.get_width() for bar in axis.patches] == pytest.approx([100 * row["caption_prevalence"] for row in selected])
+        expected_upper = min(100, max(1, 1.25 * max((row["caption_prevalence"] * 100 for row in selected), default=0))) if category == "direction" else 100
+        assert axis.get_xlim() == (0, expected_upper)
+    colors = dict(zip([label.get_text() for label in figure.axes[0].get_yticklabels()], [bar.get_width() for bar in figure.axes[0].patches]))
+    assert colors["red"] == pytest.approx(40)  # Two mentions / five nonempty captions.
+    assert "5 nonempty captions" in figure._suptitle.get_text()
+    assert "mentions do not establish visual truth" in figure._supxlabel.get_text()
+    assert caption_report == original
+
+
+def test_diversity_counts_images_and_uses_saved_scatter_coordinates(caption_report):
+    figure = create_caption_diversity_figure(caption_report)
+    ttr, overlap, scatter = figure.axes
+
+    assert sum(bar.get_height() for bar in ttr.patches) == 2
+    assert sum(bar.get_height() for bar in overlap.patches) == 2
+    assert list(map(tuple, scatter.collections[0].get_offsets())) == [(6, 0.5), (4, 1.0)]
+    assert "Available images: 2" in ttr.get_title()
+    assert "Image count" == overlap.get_ylabel()
+    assert "2 pairs total" in figure._supxlabel.get_text()
+    assert "not semantics" in figure._supxlabel.get_text()
+
+
+def test_rare_direction_mention_is_visible_on_finer_percentage_scale():
+    source = synthetic_source(empty=True)
+    records = []
+    for index in range(2501):
+        identity = source.spec.image_id(index)
+        image = ImageRecord(identity, source.spec.repo_id, source.spec.revision, "train", index, index, f"bird-{index}.jpg", 0, NAMES[0])
+        text = "left bird" if index == 0 else "bird"
+        records.append((image, parse_captions(text, image_id=identity)))
+    source.dataset = records
+    source.iter_records = lambda: iter(records)
+    caption_report = build_caption_details_report(source, expected_records=len(records))
+
+    figure = create_caption_language_figure(caption_report)
+    direction = figure.axes[2]
+
+    assert direction.get_xlim() == (0, 1)
+    assert direction.patches[0].get_width() == pytest.approx(100 / 2501)
+    assert any(text.get_text() == "0.040% (n=1)" for text in direction.texts)
+    assert direction.xaxis.get_major_formatter().decimals == 2
+    assert "finer percentage scale" in figure._supxlabel.get_text()
+    assert "not directly comparable" in figure._supxlabel.get_text()
+
+
+def test_class_rank_uses_equal_image_means_and_omits_unavailable_classes(caption_report):
+    figure = create_class_caption_variation_figure(caption_report)
+
+    assert list(figure.axes[0].lines[0].get_ydata()) == pytest.approx([2, 1.5])
+    assert "2 / 4" in figure.axes[0].get_title()
+    assert [label.get_text() for label in figure.axes[1].get_yticklabels()] == ["Blue bird", "Red bird"]
+    assert [bar.get_width() for bar in figure.axes[2].patches] == pytest.approx([1.5, 2])
+    assert "images weighted equally" in figure.axes[1].get_xlabel()
+    assert "punctuation-only" in figure._supxlabel.get_text()
+
+
+def test_prefix_titles_disclose_nonrandom_scope():
+    caption_report = build_caption_details_report(synthetic_source(), limit=2, expected_records=4)
+    figure = create_caption_diversity_figure(caption_report)
+
+    assert "nonrandom source-order prefix" in figure._suptitle.get_text()
+    assert "| complete split" not in figure._suptitle.get_text()
+    assert "2 images" in figure._suptitle.get_text()
+
+
+def test_empty_completed_report_has_no_invented_observations_or_percentages():
+    caption_report = build_caption_details_report(synthetic_source(empty=True), expected_records=1)
+    language = create_caption_language_figure(caption_report)
+    diversity = create_caption_diversity_figure(caption_report)
+    classes = create_class_caption_variation_figure(caption_report)
+
+    assert all(not len(axis.patches) for axis in language.axes)
+    assert all("undefined" in axis.get_title() for axis in language.axes)
+    assert sum(bar.get_height() for bar in diversity.axes[0].patches) == 0
+    assert not len(diversity.axes[2].collections[0].get_offsets())
+    assert not len(classes.axes[0].lines[0].get_ydata())
+    assert "reference count mismatch" in classes._suptitle.get_text()
+
+
+def test_all_three_groups_use_existing_transactional_export(caption_report, tmp_path, monkeypatch):
+    captured = []
+
+    def fake_export(figures, output_dir):
+        captured.extend(figures)
+        assert output_dir == tmp_path
+        return [Path(output_dir) / f"{stem}.png" for stem, _ in figures]
+
+    monkeypatch.setattr(detail_plots, "save_figure_bundle", fake_export)
+    paths = generate_caption_detail_figures(caption_report, tmp_path)
+
+    assert [stem for stem, _ in captured] == ["training_caption_language", "training_caption_diversity", "training_class_caption_variation"]
+    assert len(paths) == 3
+    assert all(callable(create) for _, create in captured)
+
+
+@pytest.mark.parametrize("invalid", ["schema", "test_source", "denominator", "lexicon"])
+def test_invalid_report_is_rejected_before_render_or_existing_output_changes(caption_report, tmp_path, monkeypatch, invalid):
+    existing = tmp_path / "training_caption_language.png"
+    existing.write_bytes(b"prior valid figure")
+    if invalid == "schema":
+        caption_report["schema_version"] = "unsupported"
+    elif invalid == "test_source":
+        caption_report["source"]["source_split"] = "test"
+    elif invalid == "lexicon":
+        caption_report["caption_details"]["lexicon"]["categories"]["color"]["red"] = ["blue"]
+    else:
+        caption_report["caption_details"]["coverage"]["nonempty_caption_count"] += 1
+    monkeypatch.setattr(detail_plots, "save_figure_bundle", lambda *_: pytest.fail("Unexpected export"))
+    monkeypatch.setattr(detail_plots, "_pyplot", lambda: pytest.fail("Unexpected rendering"))
+
+    with pytest.raises(ValueError):
+        generate_caption_detail_figures(caption_report, tmp_path)
+
+    assert existing.read_bytes() == b"prior valid figure"
+
+
+def test_direct_figure_api_validates_before_rendering(caption_report, monkeypatch):
+    caption_report["schema_version"] = "unsupported"
+    monkeypatch.setattr(detail_plots, "_pyplot", lambda: pytest.fail("Unexpected rendering"))
+    for create in (create_caption_language_figure, create_caption_diversity_figure, create_class_caption_variation_figure):
+        with pytest.raises(ValueError):
+            create(caption_report)
+
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pytest
+
+import src.eda.detail_plots as detail_plots
+
+
+@pytest.fixture
+def prepared_report():
+    return {
+        "schema_version": "prepared-eda-1.0", "source": {"repo_id": "synthetic/cub", "source_split": "train", "revision": "revision"},
+        "class_names": ["Alpha", "Beta", "Absent"],
+        "classes": [{"class_id": index, "class_name": name, "partition_counts": counts} for index, (name, counts) in enumerate((
+            ("Alpha", {"train": 2, "val": 1, "excluded": 0}), ("Beta", {"train": 1, "val": 1, "excluded": 0}), ("Absent", {"train": 0, "val": 0, "excluded": 0})))],
+        "preparation": {"schema_version": 1, "policy_version": "classification-v1", "split_version": "stratified-exact-group-v1", "pixel_hash_algorithm": "exif-rgb8-white:v1", "manifest_sha256": "a" * 64, "seed": 42, "val_fraction": .4, "source_revisions": {"train": "revision", "test": "test-revision"}, "source_counts": {"train": 5, "test": 2}, "partition_counts": {"train": 3, "val": 2, "test": 2, "excluded": 0}},
+        "population": {"raw_training_image_count": 5, "derived_training_image_count": 3, "validation_image_count": 2, "excluded_training_image_count": 0, "unknown_class_training_image_count": 0},
+        "official_test": {"identity_count": 2, "preserved_test_partition_count": 2, "identities_preserved": True, "image_caption_statistics_used": False},
+        "class_count_distributions": {"raw": [{"images_per_class": 0, "class_count": 1}, {"images_per_class": 2, "class_count": 1}, {"images_per_class": 3, "class_count": 1}], "train": [{"images_per_class": 0, "class_count": 1}, {"images_per_class": 1, "class_count": 1}, {"images_per_class": 2, "class_count": 1}], "val": [{"images_per_class": 0, "class_count": 1}, {"images_per_class": 1, "class_count": 2}]},
+    }
+
+
+def test_class_coverage_uses_saved_counts_and_retains_absent_classes(prepared_report):
+    before = deepcopy(prepared_report)
+    figure = detail_plots.create_prepared_class_coverage_figure(prepared_report)
+    try:
+        assert list(figure.axes[0].lines[0].get_ydata()) == [2, 1, 0]
+        assert list(figure.axes[0].lines[1].get_ydata()) == [1, 1, 0]
+        assert "2/3 classes" in figure.axes[0].lines[0].get_label()
+        assert sum(bar.get_height() for bar in figure.axes[1].patches) == 9
+        assert "Official TRAINING" in figure._suptitle.get_text()
+        assert prepared_report == before
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("change", ["schema", "test_source", "class_counts", "distribution", "unknown", "test_assignment", "fingerprint", "revision"])
+def test_invalid_coverage_cannot_replace_existing_figures(prepared_report, change, tmp_path, monkeypatch):
+    existing = tmp_path / "training_prepared_class_coverage.png"
+    existing.write_bytes(b"preserved figure")
+    if change == "schema": prepared_report["schema_version"] = "old"
+    elif change == "test_source": prepared_report["source"]["source_split"] = "test"
+    elif change == "class_counts": prepared_report["classes"][0]["partition_counts"]["train"] += 1
+    elif change == "distribution": prepared_report["class_count_distributions"]["val"][0]["class_count"] += 1
+    elif change == "unknown": prepared_report["population"]["unknown_class_training_image_count"] = 1
+    elif change == "test_assignment": prepared_report["official_test"]["identities_preserved"] = False
+    elif change == "fingerprint": prepared_report["preparation"]["manifest_sha256"] = "missing"
+    else: prepared_report["preparation"]["source_revisions"]["train"] = "other"
+    monkeypatch.setattr(detail_plots, "save_figure_bundle", lambda *_: pytest.fail("Unexpected export"))
+    monkeypatch.setattr(detail_plots, "_pyplot", lambda: pytest.fail("Unexpected rendering"))
+    with pytest.raises(ValueError): detail_plots.generate_prepared_eda_figures(prepared_report, tmp_path)
+    assert existing.read_bytes() == b"preserved figure"
+
+
+def test_coverage_export_uses_the_existing_bundle_helper(prepared_report, monkeypatch, tmp_path):
+    captured = []
+    def exporter(figures, output):
+        captured.extend(figures)
+        assert output == tmp_path
+        return [tmp_path / "training_prepared_class_coverage.png"]
+    monkeypatch.setattr(detail_plots, "save_figure_bundle", exporter)
+    assert len(detail_plots.generate_prepared_eda_figures(prepared_report, tmp_path)) == 1
+    assert captured[0][0] == "training_prepared_class_coverage"

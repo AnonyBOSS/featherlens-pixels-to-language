@@ -1,9 +1,4 @@
-"""Run metadata/caption exploration through the shared CUB loader.
-
-This is a standalone analysis entry point, not a replacement source loader or
-the shared training CLI. No image pixels are decoded. Streaming may still
-transfer image-containing Parquet row groups; the record limit is not a byte cap.
-"""
+"""Metadata and caption exploration CLI (no image decoding)."""
 
 import argparse
 from dataclasses import asdict
@@ -14,9 +9,7 @@ import platform
 import sys
 from typing import TYPE_CHECKING, Any
 
-from .caption_stats import summarize_captions
-from .dataset_stats import summarize_dataset
-from .reporting import write_json_report
+from .stats import summarize_captions, summarize_dataset, write_json_report
 
 if TYPE_CHECKING:
     from src.data.source import CubSource
@@ -36,7 +29,6 @@ def _runtime_versions() -> dict[str, Any]:
 
 
 def _build_report(source: "CubSource", records: list, population: dict) -> dict[str, Any]:
-    """Keep the statistical computation identical across selection strategies."""
     return {
         "schema_version": "1.1",
         "analysis_stage": (
@@ -89,7 +81,7 @@ def _require_training_source(source: "CubSource") -> None:
 
 
 def build_exploration_report(source: "CubSource", *, limit: int = 200) -> dict[str, Any]:
-    """Summarize the first N source rows, explicitly retaining selection limits."""
+    """Summarize the first ``limit`` training rows."""
     _require_training_source(source)
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("limit must be a positive integer")
@@ -112,12 +104,7 @@ def build_exploration_report(source: "CubSource", *, limit: int = 200) -> dict[s
 def build_training_report(
     source: "CubSource", *, expected_records: int = 5994
 ) -> dict[str, Any]:
-    """Exhaust the official training source and compare its count to a reference.
-
-    The default reference comes from the assignment; it never substitutes for
-    the measured count. A mismatch is reported and leaves full_split_verified
-    false. Iterator failures propagate without returning a completed report.
-    """
+    """Exhaust the official training source and check the count against ``expected_records``."""
     _require_training_source(source)
     if isinstance(expected_records, bool) or not isinstance(expected_records, int) or expected_records < 1:
         raise ValueError("expected_records must be a positive integer")
@@ -156,7 +143,6 @@ def main(argv: list[str] | None = None) -> None:
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
 
-    # Import only for an actual source run; pure statistical tests remain offline.
     from src.data.source import load_cub_split
 
     source = load_cub_split(args.split, streaming=True)

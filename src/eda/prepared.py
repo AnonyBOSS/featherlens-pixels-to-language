@@ -1,13 +1,6 @@
-"""Describe verified classification membership using existing training EDA.
+"""Prepared-split EDA: join train/val manifest partitions to saved image and caption reports."""
 
-The shared manifest loader owns integrity verification, eligibility decisions,
-and split construction. This consumer never parses its JSONL, re-splits data,
-decodes images, or computes duplicate fingerprints. Isolation checks below are
-observations of identifiers/hashes/group memberships already in that manifest.
-Official test rows are checked only for identity/assignment preservation and
-never enter image, caption, flag, class, or training-group analysis.
-"""
-
+import argparse
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from copy import deepcopy
@@ -18,7 +11,7 @@ from pathlib import Path
 
 from src.data.source import SourceSpec
 
-from .reporting import summarize_numbers
+from .stats import summarize_numbers, write_json_report
 
 
 _PARTITIONS = ("train", "val", "excluded")
@@ -65,9 +58,8 @@ def _metadata(summary):
 
 
 def _report_rows(image_report, caption_report):
-    # Reuse existing saved-report checks; importing this helper renders nothing.
-    from src.visualization.image_plots import _rows as validate_image_rows
-    from .explore_caption_details import validate_caption_details_report
+    from .captions import validate_caption_details_report
+    from .image_plots import _rows as validate_image_rows
 
     images = validate_image_rows(image_report)
     captions = validate_caption_details_report(caption_report)["images"]
@@ -174,12 +166,7 @@ def _groups_and_isolation(training, all_rows, constraints):
 
 
 def build_prepared_training_report(prepared_dir, *, image_report, caption_report, manifest_loader=None):
-    """Join verified preparation membership to complete raw training EDA only.
-
-    A paired-null class is retained only for an excluded training row and counted
-    as unknown, never borrowed from the EDA class map. Every known class must
-    agree across the manifest and both EDA snapshots. No output files are written.
-    """
+    """Join prepared train/val split memberships to saved image and caption reports."""
     directory = Path(prepared_dir)
     summary_path = directory / "preparation.json"
     before = summary_path.read_bytes()
@@ -216,7 +203,7 @@ def build_prepared_training_report(prepared_dir, *, image_report, caption_report
         partition = row.get("partition")
         if split == "test":
             _require(partition == "test", f"Official test identity changed partition: {identity}")
-            continue  # No test flags, caption values, or pixel measurements enter EDA.
+            continue  # test stats never enter EDA
         _require(repo == source["repo_id"], f"Manifest training repository differs from EDA: {identity}")
         _require(identity in image_by_id and identity in caption_by_id, f"Manifest training identity is missing from EDA: {identity}")
         _require(partition in _PARTITIONS and (partition in {"train", "val"}) == row["eligible"], f"Manifest training assignment violates its eligibility: {identity}")
@@ -293,3 +280,30 @@ def build_prepared_training_report(prepared_dir, *, image_report, caption_report
     _require(summary_path.read_bytes() == before, "Preparation changed while analyzing the verified manifest")
     json.dumps(result, allow_nan=False)
     return result
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prepared-dir", required=True, type=Path)
+    parser.add_argument("--image-report", type=Path, default=Path("outputs/eda/reports/train-images-full.json"))
+    parser.add_argument("--caption-report", type=Path, default=Path("outputs/eda/reports/train-caption-details-full.json"))
+    parser.add_argument("--output", type=Path, default=Path("outputs/eda/reports/prepared-training-eda.json"))
+    parser.add_argument("--figures-dir", type=Path)
+    args = parser.parse_args(argv)
+    image_bytes = args.image_report.read_bytes()
+    caption_bytes = args.caption_report.read_bytes()
+    image_report = json.loads(image_bytes)
+    caption_report = json.loads(caption_bytes)
+    report = build_prepared_training_report(args.prepared_dir, image_report=image_report, caption_report=caption_report)
+    report["input_report_sha256"] = {"images": sha256(image_bytes).hexdigest(), "captions": sha256(caption_bytes).hexdigest()}
+    write_json_report(report, args.output)
+    population = report["population"]
+    print(f"Saved prepared EDA: {population['derived_training_image_count']:,} training / {population['validation_image_count']:,} validation images to {args.output}", flush=True)
+    if args.figures_dir is not None:
+        from .detail_plots import generate_prepared_eda_figures
+        paths = generate_prepared_eda_figures(report, args.figures_dir)
+        print(f"Saved {len(paths)} prepared-data figure group as PNG/PDF", flush=True)
+
+
+if __name__ == "__main__":
+    main()
