@@ -1,8 +1,4 @@
-"""One classification experiment with portable reports and optional local MLflow.
-
-Use one writer per run directory. latest.pt owns completed-epoch recovery; JSON
-and CSV are rebuilt from checkpoints. Evidence ZIPs omit pixels and weights.
-"""
+"""Training runner with saved summaries, CSV history, and optional local MLflow logging."""
 import csv
 from datetime import datetime, timezone
 import hashlib
@@ -19,11 +15,14 @@ import numpy as np
 import torch
 
 from src.models.pretrained import ModelConfig, get_model_spec
-from src.training.checkpoint import load_model_checkpoint, read_checkpoint
-from src.training.data import PreprocessingConfig, make_pretrained_loaders
-from src.training.runtime import collect_runtime, validate_preflight_preparation, _failure
+from src.training.checkpoint import (
+    build_verified_pretrained_model, load_model_checkpoint, read_checkpoint, resolve_weight_info,
+)
+from src.training.data import (
+    PreprocessingConfig, _failure, collect_runtime, make_pretrained_loaders,
+    validate_preflight_preparation,
+)
 from src.training.trainer import TrainConfig, fit, resolve_precision
-from src.training.weights import build_verified_pretrained_model, resolve_weight_info
 
 
 def _write_json(path, value):
@@ -289,16 +288,7 @@ def _finish(directory, config, state, client, *, reload_proof=None, log_completi
 
 def run_training(prepared_dir, run_dir, config, *, device='cuda', resume=False,
                  tracking='mlflow', source=None, initial_checkpoint=None, initial_head=None) -> dict:
-    """Run or resume classification using canonical metadata and pinned weights.
-
-    config accepts TrainConfig or its plain JSON mapping. Terminal resume needs
-    no prepared data/source pixels: checkpoint config and identity are checked
-    first, then saved portable results are regenerated without training.
-    initial_checkpoint starts a fresh experiment from validated model weights;
-    its optimizer, scheduler, scaler, progress and RNG state are not restored.
-    initial_head optionally loads a hash-checked frozen-probe head on the same
-    pinned backbone and preparation; its progress is never restored.
-    """
+    """Train or resume a classification experiment from a prepared directory and config."""
     config = config if isinstance(config, TrainConfig) else TrainConfig.from_dict(config)
     if config.seed != 42:
         raise ValueError('Canonical training seed must be 42')

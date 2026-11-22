@@ -1,8 +1,4 @@
-"""Audited classification eligibility and reproducible, group-constrained splits.
-
-Preparation never edits source assets or the audit. A completed manifest is a
-versioned decision snapshot, reusable with different model preprocessing.
-"""
+"""Build and load deterministic train/val/test classification manifests."""
 
 from collections import Counter, defaultdict
 from collections.abc import Mapping
@@ -321,13 +317,7 @@ def prepare_classification(
     val_fraction: float = 0.20,
     seed: int = 42,
 ) -> dict[str, Any]:
-    """Validate a pinned audit and publish classification decisions and splits.
-
-    Both exact duplicate training rows are retained as one split unit. Caption
-    failures do not exclude a valid classification image. Unreviewed warnings
-    stop preparation. Official test assignments are preserved even for ineligible
-    rows; evaluation consumers must reject incomplete eligible test populations.
-    """
+    """Build stratified, duplicate-grouped train/val/test manifests from an audit directory."""
     _validate_configuration(val_fraction, seed)
     audit_dir, output_dir = Path(audit_dir).resolve(), Path(output_dir).resolve()
     _require(output_dir != audit_dir and audit_dir not in output_dir.parents and output_dir not in audit_dir.parents, "Use a separate preparation directory outside the audit")
@@ -362,7 +352,7 @@ def prepare_classification(
 
 
 def load_classification_manifest(prepared_dir: str | Path) -> list[dict[str, Any]]:
-    """Read a completed, fingerprint-checked preparation; never silently resplit."""
+    """Load a prepared manifest after checking its SHA-256 and split metadata."""
     directory = Path(prepared_dir)
     summary_path = directory / "preparation.json"
     initial_summary = summary_path.read_bytes()

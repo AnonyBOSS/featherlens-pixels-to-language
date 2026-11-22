@@ -12,8 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from src.data.classification import make_classification_loaders
-from src.models.finetuning import apply_parameter_policy, apply_training_policy
-from src.models.pretrained import ModelConfig
+from src.models.pretrained import ModelConfig, apply_parameter_policy, apply_training_policy
 
 
 NUM_CLASSES = 5

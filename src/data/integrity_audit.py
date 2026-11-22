@@ -1,8 +1,4 @@
-"""Read-only, row-level integrity audit for the pinned CUB sources.
-
-The outputs are observations keyed by Stage 1 image IDs, not cleaning decisions.
-Every accessible source row is retained even when its metadata or image is invalid.
-"""
+"""Row-level integrity audit for the CUB train and test Hugging Face splits."""
 
 from collections import Counter, defaultdict
 from collections.abc import Mapping

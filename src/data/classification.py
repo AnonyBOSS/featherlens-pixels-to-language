@@ -1,4 +1,4 @@
-"""Lazy classification samples and deliberately small DataLoader interfaces."""
+"""PyTorch Dataset and DataLoader builders for prepared CUB classification splits."""
 from collections.abc import Callable, Mapping, Sequence
 import random
 from typing import Any
@@ -13,12 +13,7 @@ from .source import CubSource, _SOURCES
 
 
 class CubClassificationDataset(Dataset):
-    """Indexed access to one prepared partition of a pinned CubSource.
-
-    Pass rows from load_classification_manifest; a bare sequence cannot certify
-    the preparation summary. Construction inspects manifest metadata only.
-    Runtime source errors raise with stable identity; samples are never skipped.
-    """
+    """Dataset wrapper for one split (train, val, or test) from a prepared manifest."""
 
     def __init__(
         self, source: CubSource, manifest: Sequence[Mapping[str, Any]], *,
@@ -96,12 +91,7 @@ def make_classification_loaders(
     datasets: Mapping[str, Dataset], *, batch_size: int = 32, num_workers: int = 0,
     seed: int = 42, pin_memory: bool = False,
 ) -> dict[str, DataLoader]:
-    """Batch explicitly supplied partitions; shuffle only train, drop nothing.
-
-    Independent generators seed sampler order and worker startup. With zero
-    workers, callers seed global Python/NumPy/torch once for augmentation.
-    This factory never reseeds global RNGs or opens additional source splits.
-    """
+    """Create DataLoaders for the supplied splits (shuffles train only)."""
     for name, value, minimum in (('batch_size', batch_size, 1), ('num_workers', num_workers, 0), ('seed', seed, 0)):
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise ValueError(f'{name} must be an integer >= {minimum}')

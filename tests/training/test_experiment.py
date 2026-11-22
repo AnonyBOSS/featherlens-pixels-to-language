@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 from src.data.classification import make_classification_loaders
 from src.models.pretrained import ModelConfig
 from src.training.checkpoint import read_checkpoint
-from src.training.runtime import CANONICAL_MANIFEST_SHA256
+from src.training.data import CANONICAL_MANIFEST_SHA256
 from src.training.trainer import TrainConfig, Phase
 
 

@@ -1,11 +1,18 @@
-"""Pretrained baselines over the existing, validated CUB classification pipeline."""
+"""Pretrained data loading, preprocessing, and environment/manifest helpers."""
 from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+import hashlib
+from importlib.metadata import PackageNotFoundError, version
+import json
 import math
 from pathlib import Path
+import platform
+import re
+import subprocess
 from typing import Any
 
+import torch
 from torch.utils.data import DataLoader
 from torchvision.transforms import ColorJitter, Compose
 
@@ -105,8 +112,7 @@ def make_pretrained_loaders(
         preprocessing = PreprocessingConfig()
     if not isinstance(preprocessing, PreprocessingConfig):
         raise ValueError("preprocessing must be a PreprocessingConfig or None")
-    # Validate before potential source network effects, using the existing
-    # loader's public parameter contract (actual construction remains below).
+    # Validate before potential source network effects, matching the loader helper options below.
     for name, value, minimum in (("batch_size", batch_size, 1), ("num_workers", num_workers, 0), ("seed", seed, 0)):
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise ValueError(f"{name} must be an integer >= {minimum}")
@@ -125,3 +131,81 @@ def make_pretrained_loaders(
     }
     return make_classification_loaders(datasets, batch_size=batch_size, num_workers=num_workers,
                                        seed=seed, pin_memory=pin_memory)
+
+
+CANONICAL_MANIFEST_SHA256 = 'a8bd05e048febf32df6d84a6e1bc16eddf6416be723e12dfc89621044962736b'
+_PARTITION_COUNTS = {'train': 4794, 'val': 1200, 'test': 5794, 'excluded': 0}
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _failure(stage, error):
+    message = str(error)
+    message = re.sub(r'(?:hf_|ghp_|github_pat_)[A-Za-z0-9_]+', '[REDACTED]', message)
+    message = re.sub(r'https?://\S+', '[URL omitted]', message)
+    return {'stage': stage, 'type': type(error).__name__, 'message': message[:1500]}
+
+
+def collect_runtime(repo_dir=None):
+    """Collect Python, package, CUDA, and git metadata without reading env vars or remotes."""
+    versions = {}
+    for name in ('torch', 'torchvision', 'numpy', 'Pillow', 'datasets', 'fsspec', 'huggingface-hub'):
+        try:
+            versions[name] = version(name)
+        except PackageNotFoundError:
+            versions[name] = None
+    cuda = {'available': bool(torch.cuda.is_available()), 'torch_cuda_version': torch.version.cuda,
+            'cudnn_version': torch.backends.cudnn.version(), 'devices': []}
+    if cuda['available']:
+        try:
+            for index in range(torch.cuda.device_count()):
+                properties = torch.cuda.get_device_properties(index)
+                cuda['devices'].append({'index': index, 'name': properties.name,
+                                        'total_memory_bytes': properties.total_memory,
+                                        'compute_capability': [properties.major, properties.minor]})
+            cuda['selected_device_index'] = torch.cuda.current_device()
+            cuda['bfloat16_supported'] = bool(torch.cuda.is_bf16_supported())
+            cuda['bfloat16_native_supported'] = bool(torch.cuda.is_bf16_supported(including_emulation=False))
+        except Exception as error:
+            cuda['inspection_failure'] = _failure('runtime', error)
+    git = {'status': 'unavailable'}
+    try:
+        directory = Path(repo_dir) if repo_dir is not None else Path(__file__).resolve().parents[2]
+        commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=directory,
+                                capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+        git = {'status': 'partial', 'commit': commit, 'dirty': None}
+        dirty = subprocess.run(['git', '--no-optional-locks', 'status', '--porcelain'], cwd=directory,
+                               capture_output=True, text=True, check=True, timeout=10).stdout
+        git = {'status': 'available', 'commit': commit, 'dirty': bool(dirty.strip())}
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {'python': platform.python_version(), 'platform': platform.platform(),
+            'versions': versions, 'cuda': cuda, 'git': git}
+
+
+def validate_preflight_preparation(prepared_dir):
+    """Check the prepared manifest SHA-256, split counts, and 200-class mapping."""
+    directory = Path(prepared_dir)
+    rows = load_classification_manifest(directory)
+    summary = json.loads((directory / 'preparation.json').read_text(encoding='utf-8'))
+    if (summary['manifest_sha256'] != CANONICAL_MANIFEST_SHA256
+            or summary['seed'] != 42 or summary['partition_counts'] != _PARTITION_COUNTS):
+        raise ValueError('Preparation does not match the canonical manifest SHA, seed42 and partition counts')
+    if len(summary['class_names']) != 200 or len(set(summary['class_names'])) != 200:
+        raise ValueError('Canonical ordered 200-class mapping required')
+    if len(rows) != sum(_PARTITION_COUNTS.values()):
+        raise ValueError('Canonical manifest row count mismatch')
+    class_bytes = json.dumps(summary['class_names'], ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    return {'status': 'metadata_validated', 'manifest_sha256': summary['manifest_sha256'],
+            'preparation_sha256': _sha256(directory / 'preparation.json'),
+            'class_mapping_sha256': hashlib.sha256(class_bytes).hexdigest(),
+            'class_mapping_hash_encoding': 'UTF-8 compact JSON ordered class_names, ensure_ascii=False',
+            'class_names': summary['class_names'], 'partition_counts': summary['partition_counts'],
+            'seed': summary['seed'], 'source_revisions': summary['source_revisions'],
+            'official_test_images_accessed': False, 'source_status': 'not_run'}
