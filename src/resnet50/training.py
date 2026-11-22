@@ -287,7 +287,7 @@ def run_experiment(
     except ImportError as error:
         raise RuntimeError(
             "Install training dependencies with: "
-            ".\\.venv\\Scripts\\python.exe -m pip install -r requirements-resnet50.txt"
+            ".\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt"
         ) from error
 
     config = deepcopy(config)
