@@ -8,8 +8,8 @@ import pytest
 
 from src.analysis.caption_details import summarize_caption_details
 from src.analysis.caption_stats import tokenize_caption
-from src.data.captions import parse_captions
-from src.data.schemas import CaptionRecord, ImageRecord, SourceSpec
+from src.data.source import parse_captions
+from src.data.source import CaptionRecord, ImageRecord, SourceSpec
 
 
 SPEC = SourceSpec("synthetic/cub", "train", "a" * 40)

@@ -13,8 +13,8 @@ import pytest
 from src.analysis.explore_caption_details import build_caption_details_report
 from src.analysis.explore_images import build_image_report
 from src.analysis.prepared_eda import build_prepared_training_report
-from src.data.captions import parse_captions
-from src.data.schemas import ImageRecord, SourceSpec
+from src.data.source import parse_captions
+from src.data.source import ImageRecord, SourceSpec
 
 
 NAMES = ("Red bird", "Blue bird")

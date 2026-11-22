@@ -16,7 +16,7 @@ import json
 import math
 from pathlib import Path
 
-from src.data.schemas import SourceSpec
+from src.data.source import SourceSpec
 
 from .reporting import summarize_numbers
 

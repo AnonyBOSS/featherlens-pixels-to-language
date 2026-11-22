@@ -17,7 +17,7 @@ import re
 from statistics import fmean
 from typing import Any
 
-from src.data.schemas import CaptionRecord, ImageRecord, SourceSpec
+from src.data.source import CaptionRecord, ImageRecord, SourceSpec
 
 from .caption_stats import tokenize_caption
 from .reporting import summarize_numbers

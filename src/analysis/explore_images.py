@@ -154,7 +154,7 @@ def prepare_gallery(report, source):
         raise ValueError("Gallery source size must match the saved report")
     if list(source.class_names) != report["class_names"]:
         raise ValueError("Gallery class mapping must match the saved report")
-    from src.data.captions import parse_captions
+    from src.data.source import parse_captions
     from src.data.image_io import read_source_image
     from src.visualization.image_plots import select_extreme_rows, select_representative_rows
     selected = select_representative_rows(report)

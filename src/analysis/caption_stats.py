@@ -35,7 +35,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 import unicodedata
 
-from src.data.schemas import CaptionRecord, ImageRecord
+from src.data.source import CaptionRecord, ImageRecord
 
 from .reporting import summarize_numbers
 

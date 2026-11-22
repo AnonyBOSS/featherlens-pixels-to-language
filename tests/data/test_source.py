@@ -1,7 +1,8 @@
 import pytest
 from datasets import ClassLabel, Dataset, Features, Image, Value
-
 import src.data.source as source
+from src.data.source import SourceSpec
+from src.data.source import parse_captions
 
 
 TRAIN_REVISION = "bd3988995e6db193427255abdebd522afe24ce76"
@@ -99,3 +100,43 @@ def test_invalid_label_is_rejected_when_record_is_read(monkeypatch):
 def test_unknown_split_is_rejected_before_loading():
     with pytest.raises(ValueError, match="source_split"):
         source.load_cub_split("validation")
+
+
+def test_image_ids_include_the_repository_revision_split_and_row():
+    train = SourceSpec("Multimodal-Fatima/CUB_train", "train", "a" * 40)
+    other_revision = SourceSpec("Multimodal-Fatima/CUB_train", "train", "b" * 40)
+    test = SourceSpec("Multimodal-Fatima/CUB_test", "test", "a" * 40)
+
+    assert train.image_id(7) == (
+        "hf:Multimodal-Fatima/CUB_train@"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:train:7"
+    )
+    assert len({train.image_id(7), train.image_id(8), other_revision.image_id(7), test.image_id(7)}) == 4
+
+
+def test_caption_parser_preserves_line_positions_and_raw_text():
+    records = parse_captions(
+        "  A  red\tbird.  \r\n\r\nSecond caption\n",
+        image_id="image-1",
+    )
+
+    assert [record.caption_index for record in records] == [0, 1, 2]
+    assert [record.raw_caption for record in records] == ["  A  red\tbird.  ", "", "Second caption"]
+    assert [record.clean_caption for record in records] == ["A red bird.", "", "Second caption"]
+    assert {record.image_id for record in records} == {"image-1"}
+
+
+def test_missing_description_yields_no_captions_without_affecting_image_record():
+    assert parse_captions(None, image_id="image-2") == ()
+
+
+def test_non_string_description_is_rejected():
+    with pytest.raises(TypeError, match="description"):
+        parse_captions(["not", "a", "string"], image_id="image-3")
+
+
+def test_vertical_tab_stays_within_caption_line():
+    records = parse_captions("Red\vbrown bird\nSecond", image_id="image-4")
+
+    assert [record.raw_caption for record in records] == ["Red\vbrown bird", "Second"]
+    assert [record.clean_caption for record in records] == ["Red brown bird", "Second"]

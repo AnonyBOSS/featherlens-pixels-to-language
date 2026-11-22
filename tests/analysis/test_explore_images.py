@@ -10,7 +10,7 @@ import pytest
 
 from src.analysis.explore_images import build_image_report, main, prepare_gallery
 from src.data.image_io import read_source_image
-from src.data.schemas import SourceSpec
+from src.data.source import SourceSpec
 
 
 def encoded(mode="RGB", color=(255, 0, 0), size=(4, 2), *, orientation=None):

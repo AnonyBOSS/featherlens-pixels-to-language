@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from PIL import Image
 
 from src.data.integrity_audit import audit_sources
-from src.data.schemas import SourceSpec
+from src.data.source import SourceSpec
 
 
 REVISION = "a" * 40

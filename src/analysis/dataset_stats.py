@@ -4,7 +4,7 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from src.data.schemas import ImageRecord
+from src.data.source import ImageRecord
 
 from .reporting import summarize_numbers
 

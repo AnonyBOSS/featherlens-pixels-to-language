@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from src.data.schemas import SourceSpec
+from src.data.source import SourceSpec
 
 from .eda_plots import _BLUE, _GOLD, _INK, _MUTED, _STYLE, _TEAL, _count_axis, _empty, _pyplot
 from .figure_export import save_figure_bundle

@@ -9,8 +9,8 @@ import pytest
 from src.analysis.explore_caption_details import (
     build_caption_details_report, main, validate_caption_details_report,
 )
-from src.data.captions import parse_captions
-from src.data.schemas import ImageRecord, SourceSpec
+from src.data.source import parse_captions
+from src.data.source import ImageRecord, SourceSpec
 
 
 def source(descriptions=("Red bird.\nBlue wing.", "Black tail.", None)):

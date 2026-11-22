@@ -7,7 +7,7 @@ from itertools import islice
 import math
 from pathlib import Path
 
-from src.data.schemas import SourceSpec
+from src.data.source import SourceSpec
 from .caption_details import LEXICON_VERSION, MATCHING_RULE, TERM_LEXICON, summarize_caption_details
 from .explore import _runtime_versions
 from .reporting import summarize_numbers, write_json_report

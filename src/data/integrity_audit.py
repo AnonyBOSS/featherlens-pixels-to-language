@@ -16,8 +16,8 @@ from typing import Any
 import datasets
 import PIL
 
-from .captions import parse_captions
-from .image_integrity import ImageInspection, inspect_image
+from .source import parse_captions
+from .image_io import ImageInspection, inspect_image
 from .source import load_cub_split
 
 

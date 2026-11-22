@@ -6,7 +6,7 @@ import json
 import pytest
 
 from src.analysis.dataset_stats import summarize_dataset
-from src.data.schemas import CaptionRecord, ImageRecord
+from src.data.source import CaptionRecord, ImageRecord
 
 
 NAMES = ("Red bird", "Blue bird", "Green bird")

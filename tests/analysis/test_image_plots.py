@@ -11,7 +11,7 @@ import pytest
 
 from src.analysis.image_stats import measure_rgb_array
 from src.analysis.image_summary import summarize_image_measurements
-from src.data.schemas import SourceSpec
+from src.data.source import SourceSpec
 import src.visualization.image_plots as image_plots
 from src.visualization.image_plots import (
     create_image_appearance_figure,

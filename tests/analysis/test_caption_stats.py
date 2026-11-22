@@ -5,8 +5,8 @@ import json
 import pytest
 
 from src.analysis.caption_stats import summarize_captions, tokenize_caption
-from src.data.captions import parse_captions
-from src.data.schemas import ImageRecord
+from src.data.source import parse_captions
+from src.data.source import ImageRecord
 
 
 def image_and_captions(image_id, description):

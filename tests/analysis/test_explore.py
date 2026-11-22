@@ -6,8 +6,8 @@ import pytest
 
 import src.analysis.explore as explore
 from src.analysis.explore import build_exploration_report, build_training_report, main
-from src.data.captions import parse_captions
-from src.data.schemas import ImageRecord, SourceSpec
+from src.data.source import parse_captions
+from src.data.source import ImageRecord, SourceSpec
 
 
 def synthetic_source():
