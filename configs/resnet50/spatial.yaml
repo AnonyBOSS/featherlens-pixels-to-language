@@ -1,4 +1,4 @@
-# Controlled against resnet50_regularized.yaml: only augmentation changes.
+# Controlled against configs/resnet50/regularized.yaml: only augmentation changes.
 # The experiment name changes for tracking; splits and model settings stay fixed.
 experiment:
   name: resnet50_spatial_augmentation

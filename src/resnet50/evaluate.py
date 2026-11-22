@@ -1,8 +1,4 @@
-"""Evaluate fixed ResNet-50 checkpoints on the full official CUB test split.
-
-No training, checkpoint selection, confidence calibration or test augmentation
-is performed. Each evaluation writes an independent report and local MLflow run.
-"""
+"""Evaluate a fixed ResNet-50 checkpoint on the official CUB test split."""
 
 import argparse
 import csv
@@ -16,7 +12,7 @@ from torch.utils.data import DataLoader
 
 
 def metrics_from_confusion(matrix: Tensor) -> dict:
-    """Rows are true classes; columns are predictions; undefined ratios are zero."""
+    """Compute accuracy and macro/per-class precision, recall, F1 from a confusion matrix."""
     matrix = matrix.detach().cpu().double()
     if (
         matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]
@@ -50,7 +46,7 @@ def evaluate_loader(
     model: nn.Module, loader: DataLoader, *, device: torch.device,
     num_classes: int, expected_samples: int,
 ) -> tuple[dict, Tensor, list[dict]]:
-    """Use all samples exactly once, in eval mode, with no gradient updates."""
+    """Run eval-mode inference over a loader and collect metrics, confusion matrix, and predictions."""
     model.eval()
     matrix = torch.zeros(num_classes, num_classes, dtype=torch.int64)
     predictions = []
@@ -92,13 +88,13 @@ def evaluate_loader(
 
 
 def evaluate_checkpoint(checkpoint_path: Path, *, device: torch.device, output_root: Path) -> Path:
+    """Evaluate one saved ResNet-50 checkpoint on the official test split and save report artifacts."""
     from mlflow.tracking import MlflowClient
     from src.data.classification import CubClassificationDataset
     from src.data.preparation import load_classification_manifest
-    from src.data.resnet50_transforms import resnet50_transform
     from src.data.source import load_cub_split
-    from src.models.resnet50 import ResNet50Classifier
-    from src.training.resnet50_experiment import project_path
+    from src.resnet50.model import ResNet50Classifier, resnet50_transform
+    from src.resnet50.training import project_path
 
     checkpoint_path = checkpoint_path.resolve()
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True, mmap=True)

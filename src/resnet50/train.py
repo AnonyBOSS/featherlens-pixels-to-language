@@ -1,10 +1,10 @@
-#
+"""CLI entry point for ResNet-50 training, smoke tests, and batch sanity checks."""
 
 import argparse
 import math
+from pathlib import Path
 import random
 import re
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,11 +19,13 @@ from src.data.classification import (
 )
 from src.data.preparation import load_classification_manifest
 from src.data.source import load_cub_split
-from src.data.resnet50_transforms import resnet50_transform
-from src.models.resnet50 import (
-    INATURALIST_WEIGHTS, ResNet50Classifier, load_inaturalist_encoder,
+from src.resnet50.model import (
+    INATURALIST_WEIGHTS,
+    ResNet50Classifier,
+    load_inaturalist_encoder,
+    resnet50_transform,
 )
-from src.training.resnet50_experiment import run_experiment
+from src.resnet50.training import run_experiment
 
 
 def _validate_seed(seed: object) -> None:
@@ -36,7 +38,7 @@ def _validate_seed(seed: object) -> None:
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
-    """Read YAML and validate the settings used by experiment setup."""
+    """Read and validate a ResNet-50 YAML training config."""
     with Path(path).open("r", encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
 
@@ -162,7 +164,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
 
 
 def seed_everything(seed: int) -> None:
-    """Seed random generators and configure deterministic cuDNN behavior."""
+    """Seed Python, NumPy, and Torch RNGs and disable cuDNN benchmarking."""
     _validate_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -173,7 +175,7 @@ def seed_everything(seed: int) -> None:
 
 
 def select_device(name: str) -> torch.device:
-    """Select CPU or CUDA, requiring CUDA when it is requested."""
+    """Return 'cpu' or 'cuda' device, raising if CUDA was requested but missing."""
     if name not in ("cpu", "cuda"):
         raise ValueError("Device must be 'cpu' or 'cuda'.")
 
@@ -190,7 +192,7 @@ def prepare_training(
     config: dict[str, Any],
     device: torch.device,
 ) -> tuple[ResNet50Classifier, dict[str, DataLoader]]:
-    """Build train/validation loaders and the pretrained model."""
+    """Load manifest/split, build train/val loaders, and construct the ResNet-50 model."""
     data = config["data"]
     prepared_dir = Path(data["prepared_dir"])
     if not prepared_dir.is_absolute():
@@ -251,7 +253,7 @@ def check_batch(
     *,
     image_size: int,
 ) -> dict[str, tuple[int, ...]]:
-    """Check one validation batch without changing weights or model mode."""
+    """Run one validation forward pass and verify input/output shapes."""
     batch = next(iter(loader))
     images = batch["image"].to(device)
     labels = batch["label"].to(device)
@@ -286,7 +288,7 @@ def main() -> None:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/resnet50_inaturalist.yaml"),
+        default=Path("configs/resnet50/inaturalist.yaml"),
         help="YAML configuration path; run from the repository root.",
     )
     modes = parser.add_mutually_exclusive_group(required=True)

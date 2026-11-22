@@ -1,9 +1,4 @@
-"""Refit a regularized linear classifier on frozen ResNet-50 features.
-
-Feature statistics are learned on training data only. Optional positive logit
-scaling uses validation labels for calibration, so validation NLL is a tuning
-measurement, not an independent test estimate. No test split is loaded here.
-"""
+"""Refit a regularized linear or shrinkage-LDA head on frozen ResNet-50 features."""
 
 import argparse
 from copy import deepcopy
@@ -61,7 +56,7 @@ def _validate_shrinkage(shrinkage: float) -> None:
 
 
 def classification_metrics(logits: Tensor, labels: Tensor) -> dict[str, float | int]:
-    """Compute unsmoothed NLL, accuracy and unweighted per-class mean F1."""
+    """Compute cross-entropy loss, accuracy, and macro F1."""
     logits, labels = logits.detach().cpu(), labels.detach().cpu()
     predictions = logits.argmax(1)
     classes = logits.shape[1]
@@ -78,7 +73,7 @@ def classification_metrics(logits: Tensor, labels: Tensor) -> dict[str, float | 
 
 
 def calibrate_logit_scale(logits: Tensor, labels: Tensor) -> float:
-    """Fit one positive scale to validation NLL without changing class ordering."""
+    """Fit a positive scalar temperature/multiplier on validation NLL via bisection."""
     scores, labels = logits.detach().cpu().double(), labels.detach().cpu()
     target_mean = scores.gather(1, labels[:, None]).mean().item()
 
@@ -102,7 +97,7 @@ def calibrate_logit_scale(logits: Tensor, labels: Tensor) -> float:
 def fold_feature_standardization(
     weight: Tensor, bias: Tensor, mean: Tensor, std: Tensor, scale: float = 1.0,
 ) -> tuple[Tensor, Tensor]:
-    """Absorb train-only feature normalization into a plain linear layer."""
+    """Fold feature mean/std normalization and logit scale into a single linear layer."""
     mean, std = mean.detach().cpu().double(), std.detach().cpu().double()
     raw_weight = weight.detach().cpu().double() / std[None, :]
     raw_bias = bias.detach().cpu().double() - raw_weight @ mean
@@ -115,7 +110,7 @@ def fit_regularized_head(
     num_classes: int, l2_strength: float, device: torch.device,
     max_iter: int = 100, calibrate: bool = True,
 ) -> HeadFit:
-    """Optimize a frozen-feature multinomial classifier with explicit L2 loss."""
+    """Fit an L2-regularized multinomial logistic head with L-BFGS on frozen features."""
     if (
         isinstance(l2_strength, bool) or not isinstance(l2_strength, (int, float))
         or not math.isfinite(l2_strength) or l2_strength <= 0
@@ -172,13 +167,7 @@ def fit_discriminant_head(
     num_classes: int, shrinkage: float, device: torch.device,
     calibrate: bool = True,
 ) -> HeadFit:
-    """Fit equal-prior LDA with train-only, isotropically shrunk covariance.
-
-    Uses pooled within-class scatter divided by N-K, then
-    S_shrunk = (1-a) * S + a * trace(S)/D * I. Shrinkage must be positive.
-    Global centering is folded into the bias. A positive validation-fitted
-    scale is optional; it does not change the mathematical class ordering.
-    """
+    """Fit equal-prior shrunk LDA: S_shrunk = (1 - shrinkage) * S + shrinkage * mean(diag(S)) * I."""
     _validate_shrinkage(shrinkage)
     if not isinstance(calibrate, bool):
         raise ValueError("calibrate must be bool.")
@@ -220,13 +209,7 @@ def fit_flip_augmented_head(
     val_features: Tensor, val_labels: Tensor, flipped_features: Tensor, *,
     num_classes: int, shrinkage: float, calibrate: bool = True,
 ) -> HeadFit:
-    """Reproduce the selected two-view discriminant fitting recipe on CPU.
-
-    Flipped features must correspond to the same training rows in the same
-    order. Centering uses both TRAIN views and is folded into the final layer.
-    Float32 centered features match the recorded 320px search's fitting path.
-    Reported train metrics cover original images only, not both fitted views.
-    """
+    """Fit shrunk LDA on original + horizontally flipped training views on CPU."""
     _validate_features(train_features, train_labels, val_features, val_labels, num_classes)
     if (
         flipped_features.shape != train_features.shape
@@ -260,7 +243,7 @@ def fit_flip_augmented_head(
 def collect_features(
     model: nn.Module, loader: DataLoader, device: torch.device, *, horizontal_flip: bool = False,
 ) -> tuple[Tensor, Tensor]:
-    """Collect deterministic pooled features without updating the encoder."""
+    """Extract pooled features and labels from a loader in eval mode."""
     model.eval()
     features, labels = [], []
     for batch in loader:
@@ -280,14 +263,13 @@ def refit_checkpoint(
     image_size: int | None = None, batch_size: int | None = None,
     train_horizontal_flip: bool = False,
 ) -> Path:
-    """Create an inference-only checkpoint and a local MLflow refit run."""
+    """Refit the classifier head on extracted features and save an inference-only checkpoint."""
     from mlflow.tracking import MlflowClient
     from src.data.classification import CubClassificationDataset
     from src.data.preparation import load_classification_manifest
-    from src.data.resnet50_transforms import resnet50_transform
     from src.data.source import load_cub_split
-    from src.models.resnet50 import ResNet50Classifier
-    from src.training.resnet50_experiment import project_path
+    from src.resnet50.model import ResNet50Classifier, resnet50_transform
+    from src.resnet50.training import project_path
 
     if method not in ("logistic", "discriminant"):
         raise ValueError("method must be logistic or discriminant.")

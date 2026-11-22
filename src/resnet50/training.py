@@ -1,27 +1,261 @@
-"""Two-stage ResNet-50 experiments with local tracking and checkpoints."""
+"""Two-stage ResNet-50 training loop, checkpoints, and MLflow experiment runner."""
 
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import json
+import math
+import os
 from pathlib import Path
+import tempfile
 from time import perf_counter
 from typing import Any
 
+import numpy as np
 import torch
+from torch import nn
+from torch.optim import AdamW, Optimizer
 from torch.utils.data import DataLoader, Subset
 
 from src.data.classification import make_classification_loaders
-from src.models.resnet50 import ResNet50Classifier
-from src.training.resnet50_training import (
-    build_optimizer,
-    save_checkpoint,
-    train_one_epoch,
-    validate_one_epoch,
-)
+from src.resnet50.model import ResNet50Classifier
+
+
+@dataclass(frozen=True)
+class EpochMetrics:
+    loss: float
+    accuracy: float
+    samples: int
+
+
+def build_optimizer(
+    model: ResNet50Classifier,
+    *,
+    classifier_learning_rate: float,
+    weight_decay: float,
+    encoder_learning_rate: float | None = None,
+) -> AdamW:
+    """Build AdamW for the model's active stage (head-only or head + unfrozen encoder)."""
+    if (
+        not math.isfinite(classifier_learning_rate)
+        or classifier_learning_rate <= 0
+    ):
+        raise ValueError("classifier_learning_rate must be finite and positive.")
+
+    if not math.isfinite(weight_decay) or weight_decay < 0:
+        raise ValueError("weight_decay must be finite and non-negative.")
+
+    parameter_groups = [
+        {
+            "params": model.classifier.parameters(),
+            "lr": classifier_learning_rate,
+        }
+    ]
+
+    if model.stage == "head":
+        if encoder_learning_rate is not None:
+            raise ValueError("Head training does not use encoder_learning_rate.")
+    elif model.stage == "finetune":
+        if (
+            encoder_learning_rate is None
+            or not math.isfinite(encoder_learning_rate)
+            or encoder_learning_rate <= 0
+        ):
+            raise ValueError("encoder_learning_rate must be finite and positive.")
+
+        encoder_parameters = [
+            parameter for parameter in model.encoder.parameters()
+            if parameter.requires_grad
+        ]
+        if not encoder_parameters:
+            raise ValueError("Fine-tuning requires trainable encoder parameters.")
+        parameter_groups.append(
+            {
+                "params": encoder_parameters,
+                "lr": encoder_learning_rate,
+            }
+        )
+    else:
+        raise ValueError(f"Unsupported training stage: {model.stage!r}")
+
+    return AdamW(
+        parameter_groups,
+        lr=classifier_learning_rate,
+        weight_decay=weight_decay,
+    )
+
+
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: Optimizer,
+    device: torch.device,
+    *,
+    label_smoothing: float = 0.0,
+    mixup_alpha: float = 0.0,
+) -> EpochMetrics:
+    """Run one training epoch with optional label smoothing and MixUp."""
+    if (
+        isinstance(label_smoothing, bool)
+        or not isinstance(label_smoothing, (int, float))
+        or not 0 <= label_smoothing < 1
+    ):
+        raise ValueError("label_smoothing must be a finite probability in [0, 1).")
+    if (
+        isinstance(mixup_alpha, bool) or not isinstance(mixup_alpha, (int, float))
+        or not math.isfinite(mixup_alpha) or mixup_alpha < 0
+    ):
+        raise ValueError("mixup_alpha must be finite and non-negative.")
+    model.train()
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
+    loss_sum = 0.0
+    correct = 0
+    samples = 0
+
+    for batch in loader:
+        images = batch["image"].to(device)
+        labels = batch["label"].to(device)
+
+        optimizer.zero_grad(set_to_none=True)
+
+        weight = 1.0
+        mixed_labels = labels
+        if mixup_alpha > 0:
+            weight = float(np.random.beta(mixup_alpha, mixup_alpha))
+            order = torch.randperm(images.size(0), device=images.device)
+            images = weight * images + (1 - weight) * images[order]
+            mixed_labels = labels[order]
+        logits = model(images)
+        loss = loss_fn(logits, labels)
+        if mixup_alpha > 0:
+            loss = weight * loss + (1 - weight) * loss_fn(logits, mixed_labels)
+
+        if not torch.isfinite(loss).item():
+            raise FloatingPointError("Training loss is not finite.")
+
+        loss.backward()
+        optimizer.step()
+
+        batch_size = labels.size(0)
+        loss_sum += loss.item() * batch_size
+        predictions = logits.argmax(dim=1)
+        correct += weight * (predictions == labels).sum().item()
+        correct += (1 - weight) * (predictions == mixed_labels).sum().item()
+        samples += batch_size
+
+    if samples == 0:
+        raise ValueError("The training loader produced no samples.")
+
+    return EpochMetrics(
+        loss=loss_sum / samples,
+        accuracy=correct / samples,
+        samples=samples,
+    )
+
+
+@torch.no_grad()
+def validate_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+) -> EpochMetrics:
+    """Measure validation loss and accuracy."""
+    model.eval()
+    loss_fn = nn.CrossEntropyLoss()
+
+    loss_sum = 0.0
+    correct = 0
+    samples = 0
+
+    for batch in loader:
+        images = batch["image"].to(device)
+        labels = batch["label"].to(device)
+
+        logits = model(images)
+        loss = loss_fn(logits, labels)
+
+        if not torch.isfinite(loss).item():
+            raise FloatingPointError("Validation loss is not finite.")
+
+        batch_size = labels.size(0)
+        loss_sum += loss.item() * batch_size
+        correct += (logits.argmax(dim=1) == labels).sum().item()
+        samples += batch_size
+
+    if samples == 0:
+        raise ValueError("The validation loader produced no samples.")
+
+    return EpochMetrics(
+        loss=loss_sum / samples,
+        accuracy=correct / samples,
+        samples=samples,
+    )
+
+
+def save_checkpoint(
+    path: str | Path,
+    *,
+    model: ResNet50Classifier,
+    optimizer: Optimizer,
+    epoch: int,
+    val_metrics: EpochMetrics,
+    best_val_accuracy: float,
+    config: dict[str, object],
+) -> None:
+    """Atomically save a stage checkpoint with model, optimizer, metrics, and config."""
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+        raise ValueError("epoch must be a positive integer.")
+
+    if (
+        val_metrics.samples < 1
+        or not math.isfinite(val_metrics.loss)
+        or val_metrics.loss < 0
+        or not 0 <= val_metrics.accuracy <= 1
+    ):
+        raise ValueError("Validation metrics must be finite and valid.")
+
+    if not val_metrics.accuracy <= best_val_accuracy <= 1:
+        raise ValueError(
+            "best_val_accuracy must be between current validation accuracy and 1."
+        )
+
+    checkpoint = {
+        "schema_version": 1,
+        "num_classes": model.classifier.out_features,
+        "stage": model.stage,
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "val_metrics": asdict(val_metrics),
+        "best_val_accuracy": best_val_accuracy,
+        "config": json.loads(json.dumps(config, allow_nan=False)),
+    }
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            torch.save(checkpoint, temporary_file)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def project_path(value: str) -> Path:
-    """Resolve configured relative paths from the repository root."""
+    """Resolve a path relative to the repository root."""
     path = Path(value)
     if not path.is_absolute():
         path = Path(__file__).resolve().parents[2] / path
@@ -47,12 +281,7 @@ def run_experiment(
     *,
     smoke_test: bool = False,
 ) -> Path:
-    """Train both stages and return the directory containing their checkpoints.
-
-    Model and loaders must come from prepare_training with validated config.
-    Smoke tests use bounded subsets and a separately named MLflow experiment.
-    This starts a new experiment; checkpoint resumption is not implemented here.
-    """
+    """Run head warmup followed by encoder fine-tuning and log to local MLflow."""
     try:
         from mlflow.tracking import MlflowClient
     except ImportError as error:
