@@ -1,187 +1,91 @@
-# From Pixels to Language
+# FeatherLens
 
-**FeatherLens: a PyTorch project for bird classification, image colorization and caption generation.**
+PyTorch project on **CUB-200-2011** exploring fine-grained bird classification first, with the learned CNN representations meant to support downstream colorization and image captioning.
 
-We use CUB-200-2011 to study how CNN representations learned for fine-grained
-classification can support later reconstruction and language tasks. Reusable
-functionality lives in Python modules; notebooks call those modules for experiments.
+## Classification Results
 
-## Current status
+| Model | Val Top-1 | Test Top-1 | Macro F1 (Test) | Reference |
+| --- | ---: | ---: | ---: | --- |
+| ConvNeXt-Tiny + ConvNeXt-V2 Base ensemble (50/50 prob. avg) | 90.92% | 90.30% | 90.12% | [`docs/models.md`](docs/models.md#1-convnext-ensemble-9030-test-top-1) |
+| iNaturalist2021 ResNet-50 (320px LDA head refit) | 87.92% | 87.54% | 87.62% | [`docs/models.md`](docs/models.md#2-inaturalist-resnet-50-8754-test-top-1) |
+| Scratch CNN baseline & tuning | — | — | — | [`docs/classification_training_progress.md`](docs/classification_training_progress.md) |
 
-The revision-pinned data loader, integrity audit, classification preparation and
-statistical EDA are implemented. Our pretrained track provides training/recovery,
-experiment tracking, reusable encoder features, portable prediction, evaluation and
-component Grad-CAM. The merged ResNet-50 track provides its own training, prediction, evaluation, search and Grad-CAM modules. Colorization and captioning remain planned.
+Ensemble validation/test metrics are full-split measurements (`1,200` / `5,794`). A separate validation-only horizontal-flip TTA check reached `91.00%`; `94%` was not reached.
 
-Our delivered classifier averages ConvNeXt-Tiny and ConvNeXt-V2 Base probabilities
-50/50 using the original image view:
+## Setup
 
-| Partition | Images | Top-1 | Macro precision | Macro recall | Macro F1 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Validation | 1,200 | 90.9167% | 91.9721% | 90.9167% | 90.6110% |
-| Official test | 5,794 | 90.3003% | 90.6041% | 90.3735% | 90.1246% |
+Use Python 3.12 from the repository root:
 
-The separately delivered iNaturalist ResNet-50 reports 87.92% validation and 87.54%
-test accuracy. See its [workflow and retained results](docs/resnet50.md) for the
-saved-model protocol, tuning study and disclosed earlier test exposure.
-
-These are measured saved results. The separate 91.00% flip-TTA result is
-validation-only; 94% was not achieved. The team's ResNet50, scratch CNN and
-Grid Search versus Random Search comparison still need joint evidence review
-before declaring the complete classification milestone finished.
-
-## Quick start
-
-Use Python 3.12 from the repository or extracted package root. Create and activate
-an isolated environment, then install the profile for your task:
-
-```bash
+```powershell
 python -m venv .venv
+.\.venv\Scripts\Activate.ps1   # Linux/macOS: source .venv/bin/activate
+
+# CPU environment
+pip install -r requirements.txt
+
+# GPU environment (install matching CUDA PyTorch/torchvision first from pytorch.org)
+pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements-gpu.txt
 ```
 
-Windows PowerShell: `.venv\Scripts\Activate.ps1`. Linux/macOS: `source .venv/bin/activate`.
+## Quick Commands
 
-| Purpose | Requirements | Guide |
-| --- | --- | --- |
-| Statistical EDA and its tests | [requirements-eda.txt](requirements-eda.txt) | [EDA handoff](docs/eda_handoff.md) |
-| Classification data preparation and loading | [requirements-classification.txt](requirements-classification.txt) | [Classification data](docs/classification_data.md) |
-| Complete CPU development/training dependencies | [requirements.txt](requirements.txt) | [CPU setup](docs/pretrained_cnn_foundation.md#cpu-development-setup) |
-| ResNet-50 workflow | [requirements-resnet50.txt](requirements-resnet50.txt) | [ResNet-50 guide](docs/resnet50.md) |
-| Selected classifier inference and evaluation | [requirements-inference.txt](requirements-inference.txt) | [ResNet-50 workflow](docs/resnet50.md) | Merged ResNet model, training/refit, prediction, evaluation, Grad-CAM and search |
-| [Pretrained handoff](docs/pretrained_handoff.md) |
-
-Choose the profile for your workflow; do not install the historical CPU pins over a working CUDA stack. The classification/development CPU profile pins Torch 2.14.1
-and Torchvision 0.29.1; the inference profile pins the verified Torch 2.11.0 /
-Torchvision 0.26.0 runtime. Keep these environments separate. For CUDA, follow
-the selected guide and preserve a compatible accelerator build. The inference
-pins are direct dependencies; fresh installation on every platform is unverified.
-
-For prediction, obtain the separately supplied `classifier/` bundle and run:
-
-```bash
-python -m pip install -r requirements-inference.txt
-python -m pip check
+```powershell
+# Ensemble CLI prediction, Grad-CAM, and evaluation (use --device cuda if available)
 python -m src.cli predict --bundle classifier/bundle.json --image path/to/bird.jpg --device cpu
-```
+python -m src.cli gradcam --bundle classifier/bundle.json --image path/to/bird.jpg --component tiny --output outputs/cam.png --device cpu
+python -m src.cli evaluate --bundle classifier/bundle.json --prepared-dir preparation --partition val --device cpu
 
-Replace the image path with your own. Dataset files and model weights are
-supplied separately. The [pretrained handoff](docs/pretrained_handoff.md) covers
-Grad-CAM, canonical evaluation, preprocessing, encoder reuse and verification limits.
+# ResNet-50 training and evaluation
+python -m src.resnet50.train --config configs/resnet50/inaturalist.yaml --train
+python -m src.resnet50.evaluate --checkpoint path/to/model.pt --device cpu
 
-## Data and evaluation boundaries
+# Exploratory data analysis
+python -m src.eda.explore --full-training --split train
 
-The project uses [CUB-200-2011](https://www.vision.caltech.edu/datasets/cub_200_2011/)
-with captions from revision-pinned Hugging Face
-[training](https://huggingface.co/datasets/Multimodal-Fatima/CUB_train) and
-[test](https://huggingface.co/datasets/Multimodal-Fatima/CUB_test) sources.
-
-- **4,794 training images:** fitting, including data-derived preprocessing parameters.
-- **1,200 validation images:** model selection, six images per class.
-- **5,794 official-test images:** frozen final assessment only; no tuning.
-
-The seed-42 split preserves official test assignments and keeps the exact-duplicate
-Pigeon Guillemot pair together in validation. Full auditing accounted for all
-11,788 source rows, decoded every image and found no exact train/test duplicate
-group. Classification preparation excluded no images. Source assets stay immutable.
-
-The Dataset returns `{"image": tensor, "label": class_id, "image_id": stable_id}`.
-Shared default geometry fits the whole EXIF-corrected RGB image inside a centered
-white 224×224 canvas; normalization is configurable and horizontal flipping is
-training-only. The selected pretrained bundle instead fixes Tiny at 448 pixels
-and Base at 384. See the relevant guide before changing a measured recipe.
-
-Statistical EDA covers the complete raw official-training population of 5,994
-images and 59,940 captions, including derived-validation members. Its summaries
-exclude official test. See the [EDA handoff](docs/eda_handoff.md) for figures and findings.
-
-## Selected iNaturalist ResNet-50 workflow
-
-The complete merged [ResNet-50 guide](docs/resnet50.md) preserves its configurations,
-source hashes, 224px encoder training, 320px classifier refit and saved-model commands.
-The shared [preparation directory](preparation/README.md) contains the approved
-metadata; source images and trained weights remain separate.
-
-### Grid versus random search for ResNet-50
-
-The recorded study compared eight grid and eight random LDA-shrinkage trials.
-See the [search protocol and results](docs/resnet50.md#grid-versus-random-search-for-resnet-50)
-for trial budgets, timing exclusions and the distinction from the selected
-original-plus-flipped-view classifier. It is not a new experiment from integration.
-
-## Project structure
-
-```text
-featherlens/
-├── configs/                 # Experiment configurations
-├── docs/                    # Data contracts, handoffs and technical references
-├── notebooks/pretrained/    # Cloud preflight and training experiments
-├── outputs/                 # Generated artifacts, ignored by Git
-├── src/
-│   ├── data/                # Source access, audit, preparation and transforms
-│   ├── analysis/            # Statistical EDA and report generation
-│   ├── models/              # CNN adapters and fine-tuning policies
-│   ├── training/            # Training, tracking, checkpoints and verification
-│   ├── evaluation/          # Metrics, portable inference and Grad-CAM
-│   ├── visualization/       # EDA figures
-│   ├── utils/               # Shared utilities
-│   └── cli.py               # Command-line entry points
-├── tests/                   # Tests mirroring the source modules
-├── requirements-eda.txt
-├── requirements-classification.txt
-├── requirements-inference.txt
-├── requirements-resnet50.txt
-├── requirements.txt
-└── README.md
-```
-
-## Guides and commands
-
-| Start here | Purpose |
-| --- | --- |
-| [ResNet-50 workflow](docs/resnet50.md) | Merged ResNet model, training/refit, prediction, evaluation, Grad-CAM and search |
-| [Pretrained handoff](docs/pretrained_handoff.md) | Current prediction, evaluation, Grad-CAM and encoder usage |
-| [CNN technical reference](docs/pretrained_cnn_foundation.md) | Model configuration, fine-tuning, training and recovery |
-| [Classification data](docs/classification_data.md) | Audit-backed manifests, splits, transforms and DataLoaders |
-| [Source contract](docs/data_contract.md), [image access](docs/image_access.md), [integrity audit](docs/integrity_audit.md) | Shared interfaces and audit policy |
-| [EDA handoff](docs/eda_handoff.md) | Teammate-owned image/caption analysis, plots and findings |
-| [Historical GPU preflight](docs/gpu_preflight.md) | Earlier Colab/Kaggle workflow, returned evidence and limitations |
-
-The [preflight notebook](notebooks/pretrained/01_gpu_preflight.ipynb) performs no
-optimizer updates. The [training notebook](notebooks/pretrained/02_train_convnext.ipynb)
-calls the shared trainer. To inspect available commands or run the development
-suite from a compatible environment:
-
-```bash
-python -m src.cli --help
+# Run test suite (set FEATHERLENS_PREPARED_DIR=preparation to include real-data check if cached)
 python -m pytest -q
 ```
 
-Keep data, checkpoints, environments, generated reports and figures out of Git.
-Develop on isolated branches and review changes through pull requests. Preserve
-experimental failures and provenance alongside successful results.
+For scratch-CNN training, hyperparameter tuning, and `--checkpoint` CLI commands, see [`docs/classification_training_progress.md`](docs/classification_training_progress.md#integrated-cli-2026-11-03).
 
-## Target architecture
+## Repository Layout
 
-Classification supplies spatial and pooled CNN features for later tasks:
+```text
+featherlens/
+├── bin/                   # Scratch-CNN convenience wrappers (train, tune, test)
+├── configs/               # YAML / JSON configs (cls.yaml, pretrained_acceptance.json, resnet50/*.yaml)
+├── docs/                  # Consolidated guides (data.md, eda.md, models.md, classification_training_progress.md)
+├── notebooks/             # train_convnext.ipynb (Colab / Kaggle GPU training)
+├── outputs/               # Ignored artifacts and local deliverables
+├── preparation/           # Fixed 4,794 / 1,200 / 5,794 CUB classification split manifest
+├── src/
+│   ├── data/              # Hugging Face loaders, EXIF/RGB image I/O, integrity audit, split builder, transforms
+│   ├── eda/               # Exploratory data analysis and figure generation
+│   ├── models/            # Pretrained encoder adapters and scratch CNN architecture
+│   ├── resnet50/          # Self-contained iNaturalist ResNet-50 train, head refit, search, eval, and Grad-CAM
+│   ├── training/          # Pretrained trainer, checkpoints/weight verification, experiment runner, scratch trainer/tuning
+│   ├── evaluation/        # Ensemble inference, metrics, and Grad-CAM
+│   ├── visualization/     # Scratch CNN training plots and Grad-CAM helpers
+│   └── cli.py             # Shared CLI entry point
+├── tests/                 # Pytest suite mirroring src/
+├── requirements.txt       # Pinned CPU dependencies
+└── requirements-gpu.txt   # Non-torch dependencies for CUDA environments
+```
+
+## Target Architecture
 
 ```mermaid
 flowchart TD
     A["CUB images"] --> B["CNN encoder"]
     B --> C["Classification head"]
-    B --> D["Colorization decoder - planned"]
-    B --> E["Caption decoder - planned"]
+    B --> D["Colorization decoder (planned)"]
+    B --> E["Caption decoder (planned)"]
 ```
 
-Colorization will be evaluated with PSNR, MAE and qualitative comparisons;
-captioning with BLEU, ROUGE-L and generated-caption inspection. These downstream
-components and their CLIs remain future work.
+## Documentation
 
-## Acknowledgments
-
-Data and research build on CUB-200-2011, its associated text descriptions,
-PyTorch/Torchvision and the cited pretrained model authors. See the task guides
-and retained experiment records for exact sources and verification limits.
-
-### Scratch classification commands
-
-See the [integrated scratch CLI guide](docs/classification_training_progress.md#integrated-cli-2026-11-03) for YAML training, tuning, checkpoint prediction and Grad-CAM. Final test evaluation requires `--allow-official-test`; portable pretrained inference uses `--bundle`, mutually exclusive with scratch `--checkpoint`.
+- [`docs/data.md`](docs/data.md) — Pinned Hugging Face sources, image normalization, integrity audit, and fixed split rules
+- [`docs/eda.md`](docs/eda.md) — Class distribution, geometry, color, and caption statistics across `5,994` training images
+- [`docs/models.md`](docs/models.md) — ConvNeXt ensemble, iNaturalist ResNet-50 workflow, results, and encoder feature reuse
+- [`docs/classification_training_progress.md`](docs/classification_training_progress.md) — Scratch CNN baseline, tuning log, and CLI reference

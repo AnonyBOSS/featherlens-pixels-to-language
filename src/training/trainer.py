@@ -319,13 +319,7 @@ class TrainConfig:
 
 def fit(model, loaders, config, run_dir, *, data_identity, weight_provenance,
         device='cpu', resume=False, on_epoch=None) -> dict:
-    """Fit completed epochs; latest.pt is the recovery authority.
-
-    Every explicit phase starts fresh AdamW moments and a new StepLR, even when
-    consecutive phases have the same mode. The FP16 scaler spans phases. Seeds
-    cover training randomness; callers seed before constructing a fresh model.
-    Nonpersistent canonical loaders are required for exact epoch continuation.
-    """
+    """Run all configured fine-tuning phases with checkpointing and resume support."""
     from src.training.checkpoint import (
         capture_rng_state, restore_rng_state, save_checkpoint, read_checkpoint, _load_model_state,
     )

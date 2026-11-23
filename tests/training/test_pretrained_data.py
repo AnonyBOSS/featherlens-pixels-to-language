@@ -203,3 +203,61 @@ def test_invalid_loader_or_model_configuration_precedes_network(tmp_path, monkey
     arguments = {"model_config": model_config(), **kwargs}
     with pytest.raises(ValueError):
         data_api().make_pretrained_loaders(tmp_path / "missing", **arguments)
+
+
+def test_runtime_is_allowlisted(monkeypatch):
+    monkeypatch.setenv("EXAMPLE_SECRET", "do-not-export")
+    facts = data_api().collect_runtime()
+    assert "do-not-export" not in json.dumps(facts)
+    assert set(facts) == {"python", "platform", "versions", "cuda", "git"}
+    assert isinstance(facts["cuda"]["available"], bool)
+    assert "fsspec" in facts["versions"]
+    assert set(facts["git"]) <= {"commit", "dirty", "status"}
+
+
+def test_git_commit_is_retained_if_dirty_status_unavailable(monkeypatch):
+    from types import SimpleNamespace
+    api = data_api()
+    def git(command, **kwargs):
+        if "rev-parse" in command:
+            return SimpleNamespace(stdout="a" * 40 + "\n")
+        raise api.subprocess.CalledProcessError(128, command)
+    monkeypatch.setattr(api.subprocess, "run", git)
+    facts = api.collect_runtime()
+    assert facts["git"] == {"status": "partial", "commit": "a" * 40, "dirty": None}
+
+
+@pytest.mark.parametrize("native_supported", [False, True])
+def test_runtime_distinguishes_bfloat16_capabilities(monkeypatch, native_supported):
+    from types import SimpleNamespace
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda index: SimpleNamespace(
+        name="synthetic CUDA fixture", total_memory=16 * 1024**3, major=8 if native_supported else 7, minor=0 if native_supported else 5))
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda including_emulation=True: including_emulation or native_supported)
+    cuda = data_api().collect_runtime()["cuda"]
+    assert cuda["bfloat16_supported"] is True
+    assert cuda["bfloat16_native_supported"] is native_supported
+
+
+def test_validate_preflight_preparation_checks_hash_and_returns_identity(audited_prepared, monkeypatch):
+    api = data_api()
+    prepared = audited_prepared[0]
+    with pytest.raises(ValueError, match="canonical"):
+        api.validate_preflight_preparation(prepared)
+    summary = json.loads((prepared / "preparation.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(api, "CANONICAL_MANIFEST_SHA256", summary["manifest_sha256"])
+    identity = api.validate_preflight_preparation(prepared)
+    assert identity["status"] == "metadata_validated"
+    assert identity["partition_counts"] == {"train": 4794, "val": 1200, "test": 5794, "excluded": 0}
+    assert len(identity["class_names"]) == 200
+
+
+def test_failure_redacts_tokens_and_urls():
+    err = RuntimeError("failed fetching https://example.com/secret with token hf_secret123 and ghp_abc")
+    record = data_api()._failure("source", err)
+    assert record["stage"] == "source"
+    assert "hf_secret123" not in record["message"]
+    assert "ghp_abc" not in record["message"]
+    assert "https://example.com" not in record["message"]

@@ -74,7 +74,7 @@ def _cmd_train(args: argparse.Namespace) -> int:
     # If run_dir, prepared_dir or JSON config is supplied, route to pretrained experiment runner
     if (getattr(args, "run_dir", None) is not None
             or getattr(args, "prepared_dir", None) is not None or config_path.suffix == ".json"):
-        from src.training.runtime import _failure
+        from src.training.data import _failure
         try:
             from src.training.experiment import run_training
             config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -355,13 +355,14 @@ def _delivery_runtime():
 
 def _cmd_bundle(args: argparse.Namespace) -> dict[str, Any]:
     _delivery_runtime()
-    from src.evaluation.inference import export_classifier_bundle, load_classifier
+    from src.evaluation.inference import (
+        evaluate_classifier, export_classifier_bundle, load_classifier, predict_image,
+    )
     if args.command == 'export-classifier':
         path=export_classifier_bundle(args.tiny_checkpoint,args.base_weights,args.base_head,args.output_dir)
         result={'status':'exported','bundle':str(path)}
     else:
         classifier=load_classifier(args.bundle,device=(args.device or "cpu"))
-        from src.evaluation.classification import predict_image,evaluate_classifier
         if args.command == 'predict':
             result=predict_image(classifier,args.image,top_k=args.top_k)
         elif args.command in ('evaluate', 'test'):
